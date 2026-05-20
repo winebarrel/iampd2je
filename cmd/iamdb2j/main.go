@@ -65,5 +65,5 @@ func convert(src io.ReadCloser, filename string, out io.Writer) error {
 		return err
 	}
 
-	return iampd2j.Convert(bs, out)
+	return iampd2j.Convert(bs, filename, out)
 }
