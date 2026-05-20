@@ -17,6 +17,7 @@ func Convert(src []byte, filename string, out io.Writer) error {
 
 	for _, block := range f.Body().Blocks() {
 		// TODO:
+		// メモ: ブロック処理切り出す・orderedmapつかう
 		fmt.Println(block)
 	}
 
