@@ -1,7 +1,9 @@
-package iampd2je
+package iampd2j
 
-import "io"
+import (
+	"io"
+)
 
-func Convert(src []byte, out io.Writer) error {
+func Convert(src []byte, filename string, out io.Writer) error {
 	return nil
 }
