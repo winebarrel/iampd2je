@@ -6,7 +6,7 @@ import (
 	"os"
 
 	"github.com/alecthomas/kong"
-	"github.com/winebarrel/iampd2je"
+	"github.com/winebarrel/iampd2j"
 )
 
 var version string
@@ -49,7 +49,7 @@ func main() {
 			}
 		}
 
-		err := convert(r, os.Stdout)
+		err := convert(r, f, os.Stdout)
 
 		if err != nil {
 			log.Fatal(err)
@@ -57,7 +57,7 @@ func main() {
 	}
 }
 
-func convert(src io.ReadCloser, out io.Writer) error {
+func convert(src io.ReadCloser, filename string, out io.Writer) error {
 	defer src.Close()
 	bs, err := io.ReadAll(src)
 
@@ -65,5 +65,5 @@ func convert(src io.ReadCloser, out io.Writer) error {
 		return err
 	}
 
-	return iampd2je.Convert(bs, out)
+	return iampd2j.Convert(bs, out)
 }
