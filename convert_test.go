@@ -101,6 +101,29 @@ data "aws_iam_policy_document" "p" {
 	assert.Contains(t, err.Error(), "list literals")
 }
 
+func TestConvert_PrincipalsMergeForExprFails(t *testing.T) {
+	src := []byte(`
+data "aws_iam_policy_document" "p" {
+  statement {
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "AWS"
+      identifiers = [for r in var.roles : r.arn]
+    }
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::222:role/b"]
+    }
+  }
+}
+`)
+	var out bytes.Buffer
+	c := &iampd2j.Converter{Out: &out}
+	err := c.Convert(src, "in.tf")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "list literals")
+}
+
 func TestConvert_NotPrincipalsAndNotResources(t *testing.T) {
 	src := []byte(`
 data "aws_iam_policy_document" "p" {

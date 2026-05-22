@@ -9,6 +9,7 @@ import (
 	"unicode"
 
 	"github.com/hashicorp/hcl/v2"
+	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/hashicorp/hcl/v2/hclwrite"
 )
 
@@ -231,9 +232,18 @@ func mergeTupleLiterals(exprs []string) (string, bool) {
 	return "[" + strings.Join(items, ", ") + "]", true
 }
 
+// tupleInner returns the inner text of an HCL tuple constructor expression
+// (e.g. `["a", "b"]` → `"a", "b"`). It re-parses the expression to make sure
+// the outer brackets really belong to a tuple constructor, so that splice-by-
+// string never accepts other bracketed forms such as for-expressions
+// (`[for x in xs : x]`) which would produce invalid HCL when merged.
 func tupleInner(s string) (string, bool) {
 	s = strings.TrimSpace(s)
-	if len(s) < 2 || s[0] != '[' || s[len(s)-1] != ']' {
+	expr, diags := hclsyntax.ParseExpression([]byte(s), "", hcl.Pos{Line: 1, Column: 1})
+	if diags.HasErrors() {
+		return "", false
+	}
+	if _, ok := expr.(*hclsyntax.TupleConsExpr); !ok {
 		return "", false
 	}
 	inner := strings.TrimSpace(s[1 : len(s)-1])
