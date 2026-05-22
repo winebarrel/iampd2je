@@ -318,12 +318,12 @@ func isHCLIdentifier(s string) bool {
 	}
 	for i, r := range s {
 		if i == 0 {
-			if !(unicode.IsLetter(r) || r == '_') {
+			if !unicode.IsLetter(r) && r != '_' {
 				return false
 			}
 			continue
 		}
-		if !(unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-') {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' && r != '-' {
 			return false
 		}
 	}
