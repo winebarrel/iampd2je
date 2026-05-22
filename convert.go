@@ -11,7 +11,6 @@ import (
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/hashicorp/hcl/v2/hclwrite"
-	"github.com/zclconf/go-cty/cty"
 )
 
 type Converter struct {
@@ -354,10 +353,7 @@ func unquoteString(s string) (string, bool) {
 	if !ok || !tmpl.IsStringLiteral() {
 		return "", false
 	}
-	val, diags := tmpl.Value(nil)
-	if diags.HasErrors() || val.IsNull() || !val.Type().Equals(cty.String) {
-		return "", false
-	}
+	val, _ := tmpl.Value(nil)
 	return val.AsString(), true
 }
 
