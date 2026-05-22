@@ -2,6 +2,7 @@ package iampd2j_test
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -122,6 +123,114 @@ data "aws_iam_policy_document" "p" {
 	err := c.Convert(src, "in.tf")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "list literals")
+}
+
+func TestConvert_PrincipalTypeDynamicKey(t *testing.T) {
+	src := []byte(`
+data "aws_iam_policy_document" "p" {
+  statement {
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = var.principal_type
+      identifiers = ["arn:aws:iam::111:role/a"]
+    }
+  }
+}
+`)
+	var out bytes.Buffer
+	c := &iampd2j.Converter{Out: &out, Err: io.Discard}
+	require.NoError(t, c.Convert(src, "in.tf"))
+	got := out.String()
+	assert.Contains(t, got, "(var.principal_type) = [")
+}
+
+func TestConvert_PrincipalTypeMixedLiteralAndDynamic(t *testing.T) {
+	src := []byte(`
+data "aws_iam_policy_document" "p" {
+  statement {
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::111:role/a"]
+    }
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::222:role/b"]
+    }
+    principals {
+      type        = var.extra_type
+      identifiers = ["arn:aws:iam::333:role/c"]
+    }
+  }
+}
+`)
+	var out bytes.Buffer
+	c := &iampd2j.Converter{Out: &out, Err: io.Discard}
+	require.NoError(t, c.Convert(src, "in.tf"))
+	got := out.String()
+	assert.Regexp(t,
+		`AWS\s*=\s*\["arn:aws:iam::111:role/a", "arn:aws:iam::222:role/b"\]`, got)
+	assert.Contains(t, got, "(var.extra_type)")
+}
+
+func TestConvert_ConditionTestAndVariableDynamicKey(t *testing.T) {
+	src := []byte(`
+data "aws_iam_policy_document" "p" {
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = ["*"]
+    condition {
+      test     = var.cond_test
+      variable = var.cond_var
+      values   = ["x"]
+    }
+  }
+}
+`)
+	var out bytes.Buffer
+	c := &iampd2j.Converter{Out: &out, Err: io.Discard}
+	require.NoError(t, c.Convert(src, "in.tf"))
+	got := out.String()
+	assert.Contains(t, got, "(var.cond_test) = {")
+	assert.Contains(t, got, "(var.cond_var) = [")
+}
+
+func TestConvert_EmptyStatementListEmitted(t *testing.T) {
+	src := []byte(`
+data "aws_iam_policy_document" "p" {
+  policy_id = "empty"
+}
+`)
+	var out bytes.Buffer
+	c := &iampd2j.Converter{Out: &out, Err: io.Discard}
+	require.NoError(t, c.Convert(src, "in.tf"))
+	got := out.String()
+	assert.Regexp(t, `Statement\s*=\s*\[\s*\]`, got)
+}
+
+func TestConvert_ErrorIncludesFilenameAndPolicyName(t *testing.T) {
+	src := []byte(`
+data "aws_iam_policy_document" "broken" {
+  statement {
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "AWS"
+      identifiers = var.first
+    }
+    principals {
+      type        = "AWS"
+      identifiers = var.second
+    }
+  }
+}
+`)
+	var out bytes.Buffer
+	c := &iampd2j.Converter{Out: &out, Err: io.Discard}
+	err := c.Convert(src, "policies.tf")
+	require.Error(t, err)
+	msg := err.Error()
+	assert.Contains(t, msg, "policies.tf")
+	assert.Contains(t, msg, "broken")
 }
 
 func TestConvert_NotPrincipalsAndNotResources(t *testing.T) {

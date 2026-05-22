@@ -54,7 +54,7 @@ func (c *Converter) Convert(src []byte, filename string) error {
 		fmt.Fprintf(&out, "# %s\n", name)
 		s, err := c.convertPolicy(block.Body(), filename, name)
 		if err != nil {
-			return fmt.Errorf("%s: %w", name, err)
+			return fmt.Errorf("%s:%s: %w", filename, name, err)
 		}
 		out.WriteString(s)
 		out.WriteString("\n")
@@ -101,17 +101,15 @@ func (c *Converter) convertPolicy(body *hclwrite.Body, filename, name string) (s
 		stmts = append(stmts, s)
 	}
 
-	if len(stmts) > 0 {
-		sb.WriteString("Statement = [\n")
-		for i, s := range stmts {
-			sb.WriteString(s)
-			if i < len(stmts)-1 {
-				sb.WriteString(",")
-			}
-			sb.WriteString("\n")
+	sb.WriteString("Statement = [\n")
+	for i, s := range stmts {
+		sb.WriteString(s)
+		if i < len(stmts)-1 {
+			sb.WriteString(",")
 		}
-		sb.WriteString("]\n")
+		sb.WriteString("\n")
 	}
+	sb.WriteString("]\n")
 
 	sb.WriteString("})")
 	return sb.String(), nil
@@ -165,8 +163,9 @@ func convertStatement(body *hclwrite.Body) (string, error) {
 
 func buildPrincipals(body *hclwrite.Body, blockType string) (string, error) {
 	type entry struct {
-		typeStr string
-		idsExpr string
+		groupKey string // canonical key for grouping/merging (decoded literal or raw source)
+		emitKey  string // HCL-formatted key for output (bare/quoted ident or parenthesized expr)
+		idsExpr  string
 	}
 	var entries []entry
 	for _, b := range body.Blocks() {
@@ -178,43 +177,56 @@ func buildPrincipals(body *hclwrite.Body, blockType string) (string, error) {
 		if typeAttr == nil || idsAttr == nil {
 			return "", fmt.Errorf("%s block requires both type and identifiers", blockType)
 		}
-		typeStr, ok := unquoteString(exprString(typeAttr.Expr()))
-		if !ok {
-			return "", fmt.Errorf("%s.type must be a string literal", blockType)
-		}
-		entries = append(entries, entry{typeStr, exprString(idsAttr.Expr())})
+		groupKey, emitKey := objectKey(typeAttr.Expr())
+		entries = append(entries, entry{groupKey, emitKey, exprString(idsAttr.Expr())})
 	}
 	if len(entries) == 0 {
 		return "", nil
 	}
 
 	var order []string
+	emitKeys := map[string]string{}
 	groups := map[string][]string{}
 	for _, e := range entries {
-		if _, ok := groups[e.typeStr]; !ok {
-			order = append(order, e.typeStr)
+		if _, ok := groups[e.groupKey]; !ok {
+			order = append(order, e.groupKey)
+			emitKeys[e.groupKey] = e.emitKey
 		}
-		groups[e.typeStr] = append(groups[e.typeStr], e.idsExpr)
+		groups[e.groupKey] = append(groups[e.groupKey], e.idsExpr)
 	}
 
 	var sb strings.Builder
 	sb.WriteString("{\n")
-	for _, t := range order {
-		ids := groups[t]
+	for _, k := range order {
+		ids := groups[k]
 		var val string
 		if len(ids) == 1 {
 			val = ids[0]
 		} else {
 			merged, ok := mergeTupleLiterals(ids)
 			if !ok {
-				return "", fmt.Errorf("%s.identifiers must be list literals to merge multiple %s blocks with type %q", blockType, blockType, t)
+				return "", fmt.Errorf("%s.identifiers must be list literals to merge multiple %s blocks with the same type", blockType, blockType)
 			}
 			val = merged
 		}
-		fmt.Fprintf(&sb, "%s = %s\n", hclKey(t), val)
+		fmt.Fprintf(&sb, "%s = %s\n", emitKeys[k], val)
 	}
 	sb.WriteString("}")
 	return sb.String(), nil
+}
+
+// objectKey turns an attribute expression (typically a `type`, `test`, or
+// `variable`) into a pair of strings: a canonical group key used for merging
+// duplicates, and an HCL-formatted key suitable for embedding into an object
+// constructor. Static string literals become bare/quoted identifiers; any
+// other expression is wrapped in parentheses so the output is still valid HCL
+// thanks to dynamic-key syntax. Non-literal keys group by source text only.
+func objectKey(expr *hclwrite.Expression) (groupKey, emitKey string) {
+	raw := exprString(expr)
+	if s, ok := unquoteString(raw); ok {
+		return s, hclKey(s)
+	}
+	return raw, "(" + raw + ")"
 }
 
 // mergeTupleLiterals merges multiple list-literal expressions into a single
@@ -254,7 +266,9 @@ func tupleInner(s string) (string, bool) {
 
 func buildConditions(body *hclwrite.Body) (string, error) {
 	type entry struct {
-		testStr, varStr, valuesExpr string
+		testGroup, testEmit string
+		varGroup, varEmit   string
+		valuesExpr          string
 	}
 	var entries []entry
 	for _, b := range body.Blocks() {
@@ -267,12 +281,9 @@ func buildConditions(body *hclwrite.Body) (string, error) {
 		if testAttr == nil || varAttr == nil || valuesAttr == nil {
 			return "", fmt.Errorf("condition block requires test, variable, and values")
 		}
-		testStr, ok1 := unquoteString(exprString(testAttr.Expr()))
-		varStr, ok2 := unquoteString(exprString(varAttr.Expr()))
-		if !ok1 || !ok2 {
-			return "", fmt.Errorf("condition.test and condition.variable must be string literals")
-		}
-		entries = append(entries, entry{testStr, varStr, exprString(valuesAttr.Expr())})
+		tg, te := objectKey(testAttr.Expr())
+		vg, ve := objectKey(varAttr.Expr())
+		entries = append(entries, entry{tg, te, vg, ve, exprString(valuesAttr.Expr())})
 	}
 	if len(entries) == 0 {
 		return "", nil
@@ -280,27 +291,31 @@ func buildConditions(body *hclwrite.Body) (string, error) {
 
 	type varGroup struct {
 		order  []string
+		emit   map[string]string
 		values map[string][]string
 	}
 	var testOrder []string
+	testEmit := map[string]string{}
 	testGroups := map[string]*varGroup{}
 	for _, e := range entries {
-		vg, ok := testGroups[e.testStr]
+		vg, ok := testGroups[e.testGroup]
 		if !ok {
-			testOrder = append(testOrder, e.testStr)
-			vg = &varGroup{values: map[string][]string{}}
-			testGroups[e.testStr] = vg
+			testOrder = append(testOrder, e.testGroup)
+			testEmit[e.testGroup] = e.testEmit
+			vg = &varGroup{emit: map[string]string{}, values: map[string][]string{}}
+			testGroups[e.testGroup] = vg
 		}
-		if _, ok := vg.values[e.varStr]; !ok {
-			vg.order = append(vg.order, e.varStr)
+		if _, ok := vg.values[e.varGroup]; !ok {
+			vg.order = append(vg.order, e.varGroup)
+			vg.emit[e.varGroup] = e.varEmit
 		}
-		vg.values[e.varStr] = append(vg.values[e.varStr], e.valuesExpr)
+		vg.values[e.varGroup] = append(vg.values[e.varGroup], e.valuesExpr)
 	}
 
 	var sb strings.Builder
 	sb.WriteString("{\n")
 	for _, t := range testOrder {
-		fmt.Fprintf(&sb, "%s = {\n", hclKey(t))
+		fmt.Fprintf(&sb, "%s = {\n", testEmit[t])
 		vg := testGroups[t]
 		for _, v := range vg.order {
 			vals := vg.values[v]
@@ -310,11 +325,11 @@ func buildConditions(body *hclwrite.Body) (string, error) {
 			} else {
 				merged, ok := mergeTupleLiterals(vals)
 				if !ok {
-					return "", fmt.Errorf("condition.values must be list literals to merge multiple condition blocks with test %q and variable %q", t, v)
+					return "", fmt.Errorf("condition.values must be list literals to merge multiple condition blocks with the same test and variable")
 				}
 				val = merged
 			}
-			fmt.Fprintf(&sb, "%s = %s\n", hclKey(v), val)
+			fmt.Fprintf(&sb, "%s = %s\n", vg.emit[v], val)
 		}
 		sb.WriteString("}\n")
 	}
