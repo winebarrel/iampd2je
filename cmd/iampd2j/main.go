@@ -16,7 +16,7 @@ func init() {
 }
 
 type options struct {
-	Files   []string `arg:"" help:"Terraform files to convert (use \"-\" for stdin)."`
+	Files   []string `arg:"" required:"" help:"Terraform files to convert (use \"-\" for stdin)."`
 	Version kong.VersionFlag
 }
 

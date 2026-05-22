@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -118,7 +119,7 @@ data "aws_iam_policy_document" "p" {
 	c := &iampd2j.Converter{Out: &out}
 	require.NoError(t, c.Convert(src, "in.tf"))
 	got := out.String()
-	assert.Contains(t, got, `Effect      = "Deny"`)
+	assert.Regexp(t, `Effect\s*=\s*"Deny"`, got)
 	assert.Contains(t, got, "NotResource")
 	assert.Contains(t, got, "NotPrincipal")
 }
@@ -209,6 +210,60 @@ data "aws_iam_policy_document" "p" {
 	err := c.Convert(src, "in.tf")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "type and identifiers")
+}
+
+func TestConvert_ConditionMergeSameTestAndVariable(t *testing.T) {
+	src := []byte(`
+data "aws_iam_policy_document" "p" {
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = ["*"]
+    condition {
+      test     = "StringEquals"
+      variable = "aws:username"
+      values   = ["alice"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:username"
+      values   = ["bob", "carol"]
+    }
+  }
+}
+`)
+	var out bytes.Buffer
+	c := &iampd2j.Converter{Out: &out}
+	require.NoError(t, c.Convert(src, "in.tf"))
+	got := out.String()
+	assert.Contains(t, got, `"aws:username" = ["alice", "bob", "carol"]`)
+	assert.Equal(t, 1, strings.Count(got, `"aws:username"`),
+		"duplicate variable keys must be merged into one")
+}
+
+func TestConvert_ConditionMergeNonLiteralFails(t *testing.T) {
+	src := []byte(`
+data "aws_iam_policy_document" "p" {
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = ["*"]
+    condition {
+      test     = "StringEquals"
+      variable = "aws:username"
+      values   = var.users
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:username"
+      values   = ["bob"]
+    }
+  }
+}
+`)
+	var out bytes.Buffer
+	c := &iampd2j.Converter{Out: &out}
+	err := c.Convert(src, "in.tf")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "list literals")
 }
 
 func TestConvert_ConditionBlockMissingFields(t *testing.T) {

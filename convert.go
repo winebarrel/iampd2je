@@ -267,22 +267,43 @@ func buildConditions(body *hclwrite.Body) (string, error) {
 		return "", nil
 	}
 
+	type varGroup struct {
+		order  []string
+		values map[string][]string
+	}
 	var testOrder []string
-	type varEntry struct{ name, valuesExpr string }
-	groups := map[string][]varEntry{}
+	testGroups := map[string]*varGroup{}
 	for _, e := range entries {
-		if _, ok := groups[e.testStr]; !ok {
+		vg, ok := testGroups[e.testStr]
+		if !ok {
 			testOrder = append(testOrder, e.testStr)
+			vg = &varGroup{values: map[string][]string{}}
+			testGroups[e.testStr] = vg
 		}
-		groups[e.testStr] = append(groups[e.testStr], varEntry{e.varStr, e.valuesExpr})
+		if _, ok := vg.values[e.varStr]; !ok {
+			vg.order = append(vg.order, e.varStr)
+		}
+		vg.values[e.varStr] = append(vg.values[e.varStr], e.valuesExpr)
 	}
 
 	var sb strings.Builder
 	sb.WriteString("{\n")
 	for _, t := range testOrder {
 		fmt.Fprintf(&sb, "%s = {\n", hclKey(t))
-		for _, ve := range groups[t] {
-			fmt.Fprintf(&sb, "%s = %s\n", hclKey(ve.name), ve.valuesExpr)
+		vg := testGroups[t]
+		for _, v := range vg.order {
+			vals := vg.values[v]
+			var val string
+			if len(vals) == 1 {
+				val = vals[0]
+			} else {
+				merged, ok := mergeTupleLiterals(vals)
+				if !ok {
+					return "", fmt.Errorf("condition.values must be list literals to merge multiple condition blocks with test %q and variable %q", t, v)
+				}
+				val = merged
+			}
+			fmt.Fprintf(&sb, "%s = %s\n", hclKey(v), val)
 		}
 		sb.WriteString("}\n")
 	}
