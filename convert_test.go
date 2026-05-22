@@ -449,3 +449,107 @@ func TestNewConverter_Defaults(t *testing.T) {
 	assert.NotNil(t, c.Out)
 	assert.NotNil(t, c.Err)
 }
+
+func TestConvert_ZeroValueConverterDefaults(t *testing.T) {
+	src := []byte(`
+data "aws_iam_policy_document" "p" {
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = ["*"]
+  }
+}
+`)
+	c := &iampd2j.Converter{}
+	// Swap stdout/stderr so the default-assigned writers don't pollute test output.
+	origOut, origErr := os.Stdout, os.Stderr
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	require.NoError(t, err)
+	defer devnull.Close()
+	os.Stdout = devnull
+	os.Stderr = devnull
+	defer func() { os.Stdout, os.Stderr = origOut, origErr }()
+
+	require.NoError(t, c.Convert(src, "in.tf"))
+	assert.Equal(t, os.Stdout, c.Out)
+	assert.Equal(t, os.Stderr, c.Err)
+}
+
+func TestConvert_NonStatementBlockSkipped(t *testing.T) {
+	src := []byte(`
+data "aws_iam_policy_document" "p" {
+  unknown_block {
+    foo = "bar"
+  }
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = ["*"]
+  }
+}
+`)
+	var out bytes.Buffer
+	c := &iampd2j.Converter{Out: &out, Err: io.Discard}
+	require.NoError(t, c.Convert(src, "in.tf"))
+	got := out.String()
+	assert.NotContains(t, got, "unknown_block")
+	assert.Regexp(t, `Action\s*=\s*\["s3:GetObject"\]`, got)
+}
+
+func TestConvert_NotPrincipalsMergeNonLiteralFails(t *testing.T) {
+	src := []byte(`
+data "aws_iam_policy_document" "p" {
+  statement {
+    effect  = "Deny"
+    actions = ["s3:*"]
+    not_principals {
+      type        = "AWS"
+      identifiers = var.first
+    }
+    not_principals {
+      type        = "AWS"
+      identifiers = var.second
+    }
+  }
+}
+`)
+	var out bytes.Buffer
+	c := &iampd2j.Converter{Out: &out, Err: io.Discard}
+	err := c.Convert(src, "in.tf")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not_principals.identifiers")
+}
+
+func TestConvert_EmptyStringKeyIsQuoted(t *testing.T) {
+	src := []byte(`
+data "aws_iam_policy_document" "p" {
+  statement {
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = ""
+      identifiers = ["arn:aws:iam::111:role/a"]
+    }
+  }
+}
+`)
+	var out bytes.Buffer
+	c := &iampd2j.Converter{Out: &out, Err: io.Discard}
+	require.NoError(t, c.Convert(src, "in.tf"))
+	assert.Contains(t, out.String(), `"" = ["arn:aws:iam::111:role/a"]`)
+}
+
+func TestConvert_NonIdentifierKeyIsQuoted(t *testing.T) {
+	src := []byte(`
+data "aws_iam_policy_document" "p" {
+  statement {
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "1Custom"
+      identifiers = ["arn:aws:iam::111:role/a"]
+    }
+  }
+}
+`)
+	var out bytes.Buffer
+	c := &iampd2j.Converter{Out: &out, Err: io.Discard}
+	require.NoError(t, c.Convert(src, "in.tf"))
+	assert.Contains(t, out.String(), `"1Custom" = ["arn:aws:iam::111:role/a"]`)
+}
