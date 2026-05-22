@@ -15,19 +15,20 @@ go install github.com/winebarrel/iampd2j/cmd/iampd2j@latest
 ## Usage
 
 ```
-Usage: iampd2j <files> ... [flags]
+Usage: iampd2j [<files> ...] [flags]
 
 Convert aws_iam_policy_document data sources to jsonencode() expressions.
 
 Arguments:
-  <files> ...    Terraform files to convert (use "-" for stdin).
+  [<files> ...]    Terraform files to convert. Reads from stdin if no files are
+                   given or "-" is passed.
 
 Flags:
-  -h, --help    Show help.
+  -h, --help       Show help.
       --version
 ```
 
-The converted policies are written to stdout. Each block is preceded by a `# <name>` comment so it can be located and pasted into the right place by hand.
+The converted policies are written to stdout. Each block is preceded by a `# <name>` comment so it can be located and pasted into the right place by hand. With no file arguments (or with `-`) the tool reads HCL from stdin, so it can be used as a filter (e.g. `cat policies.tf | iampd2j`).
 
 ## Example
 

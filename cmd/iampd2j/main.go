@@ -16,7 +16,7 @@ func init() {
 }
 
 type options struct {
-	Files   []string `arg:"" required:"" help:"Terraform files to convert (use \"-\" for stdin)."`
+	Files   []string `arg:"" optional:"" help:"Terraform files to convert. Reads from stdin if no files are given or \"-\" is passed."`
 	Version kong.VersionFlag
 }
 
@@ -39,6 +39,10 @@ func parseArgs() *options {
 func main() {
 	opts := parseArgs()
 	conv := iampd2j.NewConverter()
+
+	if len(opts.Files) == 0 {
+		opts.Files = []string{"-"}
+	}
 
 	for _, f := range opts.Files {
 		var r io.ReadCloser
