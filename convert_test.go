@@ -186,7 +186,7 @@ func TestConvert_ParseError(t *testing.T) {
 
 func TestConvert_SourcePolicyDocumentsWarns(t *testing.T) {
 	src := []byte(`
-data "aws_iam_policy_document" "p" {
+data "aws_iam_policy_document" "merged_policy" {
   source_policy_documents = [data.aws_iam_policy_document.base.json]
   statement {
     actions   = ["s3:GetObject"]
@@ -196,14 +196,17 @@ data "aws_iam_policy_document" "p" {
 `)
 	var out, errOut bytes.Buffer
 	c := &iampd2j.Converter{Out: &out, Err: &errOut}
-	require.NoError(t, c.Convert(src, "in.tf"))
-	assert.Contains(t, errOut.String(), "source_policy_documents")
-	assert.Contains(t, errOut.String(), "merge manually")
+	require.NoError(t, c.Convert(src, "policies.tf"))
+	got := errOut.String()
+	assert.Contains(t, got, "source_policy_documents")
+	assert.Contains(t, got, "merge manually")
+	assert.Contains(t, got, "policies.tf")
+	assert.Contains(t, got, "merged_policy")
 }
 
 func TestConvert_OverridePolicyDocumentsWarns(t *testing.T) {
 	src := []byte(`
-data "aws_iam_policy_document" "p" {
+data "aws_iam_policy_document" "overridden_policy" {
   override_policy_documents = [data.aws_iam_policy_document.base.json]
   statement {
     actions   = ["s3:GetObject"]
@@ -213,8 +216,31 @@ data "aws_iam_policy_document" "p" {
 `)
 	var out, errOut bytes.Buffer
 	c := &iampd2j.Converter{Out: &out, Err: &errOut}
+	require.NoError(t, c.Convert(src, "policies.tf"))
+	got := errOut.String()
+	assert.Contains(t, got, "override_policy_documents")
+	assert.Contains(t, got, "policies.tf")
+	assert.Contains(t, got, "overridden_policy")
+}
+
+func TestConvert_ConditionVariableWithDollarSign(t *testing.T) {
+	src := []byte(`
+data "aws_iam_policy_document" "p" {
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = ["*"]
+    condition {
+      test     = "StringEquals"
+      variable = "aws:foo$bar"
+      values   = ["x"]
+    }
+  }
+}
+`)
+	var out bytes.Buffer
+	c := &iampd2j.Converter{Out: &out}
 	require.NoError(t, c.Convert(src, "in.tf"))
-	assert.Contains(t, errOut.String(), "override_policy_documents")
+	assert.Contains(t, out.String(), `"aws:foo$bar" = ["x"]`)
 }
 
 func TestConvert_PrincipalBlockMissingFields(t *testing.T) {

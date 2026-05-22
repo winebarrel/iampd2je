@@ -11,6 +11,7 @@ import (
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/hashicorp/hcl/v2/hclwrite"
+	"github.com/zclconf/go-cty/cty"
 )
 
 type Converter struct {
@@ -51,7 +52,7 @@ func (c *Converter) Convert(src []byte, filename string) error {
 		}
 		first = false
 		fmt.Fprintf(&out, "# %s\n", name)
-		s, err := c.convertPolicy(block.Body())
+		s, err := c.convertPolicy(block.Body(), filename, name)
 		if err != nil {
 			return fmt.Errorf("%s: %w", name, err)
 		}
@@ -68,10 +69,10 @@ func (c *Converter) Convert(src []byte, filename string) error {
 	return err
 }
 
-func (c *Converter) convertPolicy(body *hclwrite.Body) (string, error) {
+func (c *Converter) convertPolicy(body *hclwrite.Body, filename, name string) (string, error) {
 	for _, unsupported := range []string{"source_policy_documents", "override_policy_documents"} {
 		if body.GetAttribute(unsupported) != nil {
-			fmt.Fprintf(c.Err, "warning: %s is not converted; merge manually\n", unsupported)
+			fmt.Fprintf(c.Err, "warning: %s:%s: %s is not converted; merge manually\n", filename, name, unsupported)
 		}
 	}
 
@@ -325,15 +326,24 @@ func exprString(expr *hclwrite.Expression) string {
 	return strings.TrimSpace(string(expr.BuildTokens(nil).Bytes()))
 }
 
+// unquoteString returns the decoded value of an HCL string literal expression.
+// It only accepts templates without any interpolation, so escape sequences and
+// stray `$` characters in valid literals are handled correctly while references
+// and templates with `${...}` are still rejected.
 func unquoteString(s string) (string, bool) {
-	if len(s) < 2 || s[0] != '"' || s[len(s)-1] != '"' {
+	expr, diags := hclsyntax.ParseExpression([]byte(s), "", hcl.Pos{Line: 1, Column: 1})
+	if diags.HasErrors() {
 		return "", false
 	}
-	inner := s[1 : len(s)-1]
-	if strings.ContainsAny(inner, "\"\\$") {
+	tmpl, ok := expr.(*hclsyntax.TemplateExpr)
+	if !ok || !tmpl.IsStringLiteral() {
 		return "", false
 	}
-	return inner, true
+	val, diags := tmpl.Value(nil)
+	if diags.HasErrors() || val.IsNull() || !val.Type().Equals(cty.String) {
+		return "", false
+	}
+	return val.AsString(), true
 }
 
 func hclKey(s string) string {
