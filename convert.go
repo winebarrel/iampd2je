@@ -28,7 +28,7 @@ func (c *Converter) Convert(src []byte, filename string) error {
 		c.Out = os.Stdout
 	}
 	if c.Err == nil {
-		c.Err = io.Discard
+		c.Err = os.Stderr
 	}
 
 	f, diags := hclwrite.ParseConfig(src, filename, hcl.Pos{Line: 1, Column: 1})
