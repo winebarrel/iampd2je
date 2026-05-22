@@ -451,27 +451,14 @@ func TestNewConverter_Defaults(t *testing.T) {
 }
 
 func TestConvert_ZeroValueConverterDefaults(t *testing.T) {
-	src := []byte(`
-data "aws_iam_policy_document" "p" {
-  statement {
-    actions   = ["s3:GetObject"]
-    resources = ["*"]
-  }
-}
-`)
+	// Feed an input that fails to parse, so the default writers are assigned
+	// but Convert exits before writing anything. This lets us observe the
+	// defaulting behavior without touching process-global os.Stdout / os.Stderr.
 	c := &iampd2j.Converter{}
-	// Swap stdout/stderr so the default-assigned writers don't pollute test output.
-	origOut, origErr := os.Stdout, os.Stderr
-	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
-	require.NoError(t, err)
-	defer devnull.Close()
-	os.Stdout = devnull
-	os.Stderr = devnull
-	defer func() { os.Stdout, os.Stderr = origOut, origErr }()
-
-	require.NoError(t, c.Convert(src, "in.tf"))
-	assert.Equal(t, os.Stdout, c.Out)
-	assert.Equal(t, os.Stderr, c.Err)
+	err := c.Convert([]byte(`data "x" {`), "in.tf")
+	require.Error(t, err)
+	assert.Same(t, os.Stdout, c.Out)
+	assert.Same(t, os.Stderr, c.Err)
 }
 
 func TestConvert_NonStatementBlockSkipped(t *testing.T) {
