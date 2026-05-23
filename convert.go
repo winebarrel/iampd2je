@@ -153,7 +153,7 @@ func (c *Converter) collectPolicies() error {
 
 			for _, unsupported := range []string{"source_policy_documents", "override_policy_documents"} {
 				if block.Body().GetAttribute(unsupported) != nil {
-					fmt.Fprintf(c.Err, "warning: %s: %s.%s uses %s; merge manually\n", p, policyDocType, name, unsupported)
+					fmt.Fprintf(c.Err, "warning: %s: data.%s.%s uses %s; merge manually\n", p, policyDocType, name, unsupported)
 					pol.convertible = false
 					pol.keepBlock = true
 				}
@@ -225,7 +225,7 @@ func (c *Converter) scanTokenRefs(tokens hclwrite.Tokens, inPolicyDoc bool, path
 			// access in their code that we can't fold into jsonencode.
 			if attr != "json" {
 				if !pol.warnedNonJSON {
-					fmt.Fprintf(c.Err, "warning: %s: data.%s.%s.%s is not supported; leaving %s.%s in place\n",
+					fmt.Fprintf(c.Err, "warning: %s: data.%s.%s.%s is not supported; leaving data.%s.%s in place\n",
 						path, policyDocType, name, attr, policyDocType, name)
 					pol.warnedNonJSON = true
 				}
