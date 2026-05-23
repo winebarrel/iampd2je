@@ -147,6 +147,93 @@ func TestMatchPolicyDocRef_OK(t *testing.T) {
 	assert.Equal(t, 7, n)
 }
 
+func TestMatchPolicyDocBareRef_OK(t *testing.T) {
+	toks := tokensOf(t, "data.aws_iam_policy_document.policy_name")
+	name, n, ok := matchPolicyDocBareRef(toks, 0)
+	assert.True(t, ok)
+	assert.Equal(t, "policy_name", name)
+	assert.Equal(t, 5, n)
+}
+
+func TestMatchPolicyDocBareRef_TooShort(t *testing.T) {
+	toks := tokensOf(t, "data.aws_iam_policy_document")
+	_, _, ok := matchPolicyDocBareRef(toks, 0)
+	assert.False(t, ok)
+}
+
+func TestMatchPolicyDocBareRef_PrecededByDot(t *testing.T) {
+	toks := tokensOf(t, "x.data.aws_iam_policy_document.p")
+	_, _, ok := matchPolicyDocBareRef(toks, 2)
+	assert.False(t, ok)
+}
+
+func TestMatchPolicyDocBareRef_TrailingDot(t *testing.T) {
+	// matchPolicyDocRef handles this; matchPolicyDocBareRef must defer.
+	toks := tokensOf(t, "data.aws_iam_policy_document.p.json")
+	_, _, ok := matchPolicyDocBareRef(toks, 0)
+	assert.False(t, ok)
+}
+
+func TestMatchPolicyDocBareRef_TrailingBracket(t *testing.T) {
+	toks := tokensOf(t, "data.aws_iam_policy_document.p[0]")
+	_, _, ok := matchPolicyDocBareRef(toks, 0)
+	assert.False(t, ok)
+}
+
+func TestMatchPolicyDocBareRef_NotDataIdent(t *testing.T) {
+	toks := tokensOf(t, "other.aws_iam_policy_document.p")
+	_, _, ok := matchPolicyDocBareRef(toks, 0)
+	assert.False(t, ok)
+}
+
+func TestMatchPolicyDocBareRef_WrongType(t *testing.T) {
+	toks := tokensOf(t, "data.aws_other.p")
+	_, _, ok := matchPolicyDocBareRef(toks, 0)
+	assert.False(t, ok)
+}
+
+func TestMatchPolicyDocBareRef_FirstTokenNotIdent(t *testing.T) {
+	toks := tokensOf(t, "(data.aws_iam_policy_document.p)")
+	_, _, ok := matchPolicyDocBareRef(toks, 0)
+	assert.False(t, ok)
+}
+
+func TestMatchPolicyDocBareRef_Tok1NotDot(t *testing.T) {
+	toks := hclwrite.Tokens{
+		rawToken(hclsyntax.TokenIdent, "data"),
+		rawToken(hclsyntax.TokenIdent, "x"),
+		rawToken(hclsyntax.TokenIdent, "aws_iam_policy_document"),
+		rawToken(hclsyntax.TokenDot, "."),
+		rawToken(hclsyntax.TokenIdent, "p"),
+	}
+	_, _, ok := matchPolicyDocBareRef(toks, 0)
+	assert.False(t, ok)
+}
+
+func TestMatchPolicyDocBareRef_Tok3NotDot(t *testing.T) {
+	toks := hclwrite.Tokens{
+		rawToken(hclsyntax.TokenIdent, "data"),
+		rawToken(hclsyntax.TokenDot, "."),
+		rawToken(hclsyntax.TokenIdent, "aws_iam_policy_document"),
+		rawToken(hclsyntax.TokenIdent, "x"),
+		rawToken(hclsyntax.TokenIdent, "p"),
+	}
+	_, _, ok := matchPolicyDocBareRef(toks, 0)
+	assert.False(t, ok)
+}
+
+func TestMatchPolicyDocBareRef_Tok4NotIdent(t *testing.T) {
+	toks := hclwrite.Tokens{
+		rawToken(hclsyntax.TokenIdent, "data"),
+		rawToken(hclsyntax.TokenDot, "."),
+		rawToken(hclsyntax.TokenIdent, "aws_iam_policy_document"),
+		rawToken(hclsyntax.TokenDot, "."),
+		rawToken(hclsyntax.TokenOBrack, "["),
+	}
+	_, _, ok := matchPolicyDocBareRef(toks, 0)
+	assert.False(t, ok)
+}
+
 func TestParseExprTokens_ParseError(t *testing.T) {
 	_, err := parseExprTokens("[unterminated")
 	require.Error(t, err)

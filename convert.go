@@ -213,28 +213,39 @@ func (c *Converter) scanBodyRefs(body *hclwrite.Body, inPolicyDoc bool, path str
 func (c *Converter) scanTokenRefs(tokens hclwrite.Tokens, inPolicyDoc bool, path string) {
 	i := 0
 	for i < len(tokens) {
-		name, attr, n, ok := matchPolicyDocRef(tokens, i)
-		if !ok {
-			i++
+		if name, attr, n, ok := matchPolicyDocRef(tokens, i); ok {
+			pol, has := c.policies[name]
+			if has && pol.convertible {
+				// A non-`.json` accessor is always worth warning about,
+				// no matter where the ref appears — the user has an
+				// unsupported access in their code that we can't fold
+				// into jsonencode.
+				if attr != "json" {
+					if !pol.warnedNonJSON {
+						fmt.Fprintf(c.Err, "warning: %s: data.%s.%s.%s is not supported; leaving data.%s.%s in place\n",
+							path, policyDocType, name, attr, policyDocType, name)
+						pol.warnedNonJSON = true
+					}
+					pol.keepBlock = true
+				} else if inPolicyDoc {
+					pol.keepBlock = true
+				}
+			}
+			i += n
 			continue
 		}
-		pol, has := c.policies[name]
-		if has && pol.convertible {
-			// A non-`.json` accessor is always worth warning about, no
-			// matter where the ref appears — the user has an unsupported
-			// access in their code that we can't fold into jsonencode.
-			if attr != "json" {
-				if !pol.warnedNonJSON {
-					fmt.Fprintf(c.Err, "warning: %s: data.%s.%s.%s is not supported; leaving data.%s.%s in place\n",
-						path, policyDocType, name, attr, policyDocType, name)
-					pol.warnedNonJSON = true
-				}
-				pol.keepBlock = true
-			} else if inPolicyDoc {
+		// A bare `data.aws_iam_policy_document.NAME` (no `.json` etc.) is a
+		// legitimate Terraform pattern (depends_on, passing the object
+		// through a module). We can't inline it as jsonencode, so just
+		// keep the block to preserve the reference.
+		if name, n, ok := matchPolicyDocBareRef(tokens, i); ok {
+			if pol, has := c.policies[name]; has && pol.convertible {
 				pol.keepBlock = true
 			}
+			i += n
+			continue
 		}
-		i += n
+		i++
 	}
 }
 
@@ -396,6 +407,42 @@ func matchPolicyDocRef(t hclwrite.Tokens, i int) (string, string, int, bool) {
 		}
 	}
 	return string(t[i+4].Bytes), string(t[i+6].Bytes), 7, true
+}
+
+// matchPolicyDocBareRef matches `data . aws_iam_policy_document . NAME` with
+// no trailing accessor, i.e. a bare reference to the data source object
+// (e.g. `depends_on = [data.aws_iam_policy_document.p]`). It rejects matches
+// that are followed by a `.` or `[`, leaving those to matchPolicyDocRef or
+// to be skipped over entirely.
+func matchPolicyDocBareRef(t hclwrite.Tokens, i int) (string, int, bool) {
+	if i+4 >= len(t) {
+		return "", 0, false
+	}
+	if i > 0 && t[i-1].Type == hclsyntax.TokenDot {
+		return "", 0, false
+	}
+	if t[i].Type != hclsyntax.TokenIdent || string(t[i].Bytes) != "data" {
+		return "", 0, false
+	}
+	if t[i+1].Type != hclsyntax.TokenDot {
+		return "", 0, false
+	}
+	if t[i+2].Type != hclsyntax.TokenIdent || string(t[i+2].Bytes) != policyDocType {
+		return "", 0, false
+	}
+	if t[i+3].Type != hclsyntax.TokenDot {
+		return "", 0, false
+	}
+	if t[i+4].Type != hclsyntax.TokenIdent {
+		return "", 0, false
+	}
+	if i+5 < len(t) {
+		switch t[i+5].Type {
+		case hclsyntax.TokenDot, hclsyntax.TokenOBrack:
+			return "", 0, false
+		}
+	}
+	return string(t[i+4].Bytes), 5, true
 }
 
 func isPolicyDocBlock(blk *hclwrite.Block) bool {

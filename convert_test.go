@@ -452,6 +452,63 @@ resource "test" "x" {
 	assert.NotContains(t, got, "jsonencode({")
 }
 
+func TestConvert_BareRefKeepsBlock(t *testing.T) {
+	// A bare data.aws_iam_policy_document.p reference (no .json) is a
+	// legitimate Terraform pattern (e.g. depends_on). The block must be
+	// kept so the reference still resolves.
+	src := `data "aws_iam_policy_document" "p" {
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = ["*"]
+  }
+}
+
+resource "test" "x" {
+  depends_on = [data.aws_iam_policy_document.p]
+}
+`
+	dir := setupDir(t, map[string]string{"main.tf": src})
+	c := iampd2j.NewConverter(dir)
+	c.Err = io.Discard
+	require.NoError(t, c.Run(true))
+
+	body, err := os.ReadFile(filepath.Join(dir, "main.tf"))
+	require.NoError(t, err)
+	got := string(body)
+	assert.Contains(t, got, `data "aws_iam_policy_document" "p"`)
+	assert.Contains(t, got, "depends_on = [data.aws_iam_policy_document.p]")
+	assert.NotContains(t, got, "jsonencode({")
+}
+
+func TestConvert_BareRefAndJSONRef(t *testing.T) {
+	// Combined: an external .json ref still gets inlined, but the bare ref
+	// elsewhere keeps the data block in place so the bare ref still works.
+	src := `data "aws_iam_policy_document" "p" {
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = ["*"]
+  }
+}
+
+resource "a" "x" { v = data.aws_iam_policy_document.p.json }
+
+resource "b" "x" {
+  depends_on = [data.aws_iam_policy_document.p]
+}
+`
+	dir := setupDir(t, map[string]string{"main.tf": src})
+	c := iampd2j.NewConverter(dir)
+	c.Err = io.Discard
+	require.NoError(t, c.Run(true))
+
+	body, err := os.ReadFile(filepath.Join(dir, "main.tf"))
+	require.NoError(t, err)
+	got := string(body)
+	assert.Contains(t, got, `data "aws_iam_policy_document" "p"`)
+	assert.Contains(t, got, "jsonencode({")
+	assert.Contains(t, got, "depends_on = [data.aws_iam_policy_document.p]")
+}
+
 func TestConvert_MixedJSONAndMinifiedRef(t *testing.T) {
 	// When both .json and .minified_json refer to the same policy, the .json
 	// site is still replaced with jsonencode but the data block stays so that
