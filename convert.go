@@ -55,6 +55,13 @@ type policy struct {
 	tokens      hclwrite.Tokens // jsonencode({...}) tokens; nil if !convertible
 	convertible bool
 	keepBlock   bool
+	// warnedNonJSON is set the first time we emit the "non-.json access is
+	// not supported" warning for this policy. Tracked separately from
+	// keepBlock so the warning fires deterministically regardless of which
+	// reference site happens to be visited first — keepBlock can be set by
+	// a silent inside-policy-doc ref, but the user still needs to know
+	// they have an unsupported accessor in their code.
+	warnedNonJSON bool
 }
 
 // NewConverter returns a Converter that reads *.tf files from dir.
@@ -170,8 +177,8 @@ func (c *Converter) collectPolicies() error {
 //     body — those refs persist either via the kept outer body or via the
 //     tokens that get spliced at the outer's reference sites.
 func (c *Converter) scanReferences() {
-	for path, f := range c.files {
-		c.scanBodyRefs(f.Body(), false, path)
+	for _, path := range c.sortedPaths() {
+		c.scanBodyRefs(c.files[path].Body(), false, path)
 	}
 }
 
@@ -199,9 +206,10 @@ func (c *Converter) scanTokenRefs(tokens hclwrite.Tokens, inPolicyDoc bool, path
 			case inPolicyDoc:
 				pol.keepBlock = true
 			case attr != "json":
-				if !pol.keepBlock {
+				if !pol.warnedNonJSON {
 					fmt.Fprintf(c.Err, "warning: %s: data.%s.%s.%s is not supported; leaving %s.%s in place\n",
 						path, policyDocType, name, attr, policyDocType, name)
+					pol.warnedNonJSON = true
 				}
 				pol.keepBlock = true
 			}
@@ -236,7 +244,11 @@ func (c *Converter) rewriteAll(inPlace bool) error {
 		}
 		body := trimLeadingBlankLines(hclwrite.Format(f.Bytes()))
 		if inPlace {
-			if err := os.WriteFile(p, body, 0o644); err != nil {
+			info, err := os.Stat(p)
+			if err != nil {
+				return fmt.Errorf("stat %s: %w", p, err)
+			}
+			if err := os.WriteFile(p, body, info.Mode().Perm()); err != nil {
 				return fmt.Errorf("write %s: %w", p, err)
 			}
 			if c.Verbose {

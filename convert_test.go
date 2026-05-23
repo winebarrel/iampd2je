@@ -943,6 +943,85 @@ func TestConvert_UnreadableFile(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestConvert_WarnsForNonJSONEvenWhenAlreadyKept(t *testing.T) {
+	// outer's body references inner.json from inside, which silently sets
+	// inner.keepBlock=true (via the inPolicyDoc branch). An external
+	// `.minified_json` ref to inner must still produce the warning,
+	// independent of scan order.
+	src := `data "aws_iam_policy_document" "outer" {
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = [data.aws_iam_policy_document.inner.json]
+  }
+}
+
+data "aws_iam_policy_document" "inner" {
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = ["*"]
+  }
+}
+
+resource "r" "x" { v = data.aws_iam_policy_document.inner.minified_json }
+resource "r" "y" { v = data.aws_iam_policy_document.outer.json }
+`
+	dir := setupDir(t, map[string]string{"main.tf": src})
+	var errBuf bytes.Buffer
+	c := iampd2j.NewConverter(dir)
+	c.Err = &errBuf
+	require.NoError(t, c.Run(true))
+	assert.Contains(t, errBuf.String(), "minified_json")
+	assert.Contains(t, errBuf.String(), "is not supported")
+}
+
+func TestConvert_NonJSONWarningEmittedOnce(t *testing.T) {
+	src := `data "aws_iam_policy_document" "p" {
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = ["*"]
+  }
+}
+
+resource "a" "x" { v = data.aws_iam_policy_document.p.minified_json }
+resource "b" "x" { v = data.aws_iam_policy_document.p.minified_json }
+resource "c" "x" { v = data.aws_iam_policy_document.p.override_json }
+`
+	dir := setupDir(t, map[string]string{"main.tf": src})
+	var errBuf bytes.Buffer
+	c := iampd2j.NewConverter(dir)
+	c.Err = &errBuf
+	require.NoError(t, c.Run(true))
+	// Even with multiple unsupported accessors, the warning is emitted at
+	// most once per policy.
+	assert.Equal(t, 1, strings.Count(errBuf.String(), "is not supported"))
+}
+
+func TestConvert_InPlacePreservesFileMode(t *testing.T) {
+	dir := setupDir(t, map[string]string{
+		"main.tf": `data "aws_iam_policy_document" "p" {
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = ["*"]
+  }
+}
+
+resource "test" "x" {
+  v = data.aws_iam_policy_document.p.json
+}
+`,
+	})
+	path := filepath.Join(dir, "main.tf")
+	require.NoError(t, os.Chmod(path, 0o600))
+
+	c := iampd2j.NewConverter(dir)
+	c.Err = io.Discard
+	require.NoError(t, c.Run(true))
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+}
+
 func TestConvert_InPlaceWritesFiles(t *testing.T) {
 	dir := setupDir(t, map[string]string{
 		"main.tf": `data "aws_iam_policy_document" "p" {
