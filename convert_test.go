@@ -979,6 +979,67 @@ resource "c" "x" { v = data.aws_iam_policy_document.p.override_json }
 	assert.Equal(t, 1, strings.Count(errBuf.String(), "is not supported"))
 }
 
+func TestConvert_MissingDirReturnsError(t *testing.T) {
+	c := iampd2j.NewConverter(filepath.Join(t.TempDir(), "does-not-exist"))
+	c.Err = io.Discard
+	c.Out = io.Discard
+	err := c.Run(false)
+	require.Error(t, err)
+}
+
+func TestConvert_DirIsAFileReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "not-a-dir")
+	require.NoError(t, os.WriteFile(p, []byte("hi"), 0o644))
+	c := iampd2j.NewConverter(p)
+	c.Err = io.Discard
+	c.Out = io.Discard
+	err := c.Run(false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a directory")
+}
+
+func TestConvert_RunIsReusable(t *testing.T) {
+	// Reuse the same Converter for two independent directories. State from
+	// the first run must not leak into the second.
+	dir1 := setupDir(t, map[string]string{
+		"main.tf": `data "aws_iam_policy_document" "p" {
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = ["*"]
+  }
+}
+
+resource "test" "x" { v = data.aws_iam_policy_document.p.json }
+`,
+	})
+	dir2 := setupDir(t, map[string]string{
+		"main.tf": `data "aws_iam_policy_document" "p" {
+  statement {
+    actions   = ["s3:PutObject"]
+    resources = ["*"]
+  }
+}
+
+resource "test" "y" { v = data.aws_iam_policy_document.p.json }
+`,
+	})
+
+	c := iampd2j.NewConverter(dir1)
+	c.Err = io.Discard
+	c.Out = io.Discard
+	require.NoError(t, c.Run(true))
+
+	c.Dir = dir2
+	require.NoError(t, c.Run(true), "second Run must not see policies from the first run as duplicates")
+
+	body, err := os.ReadFile(filepath.Join(dir2, "main.tf"))
+	require.NoError(t, err)
+	got := string(body)
+	assert.Contains(t, got, "s3:PutObject")
+	assert.NotContains(t, got, `data "aws_iam_policy_document"`)
+}
+
 func TestConvert_InPlacePreservesFileMode(t *testing.T) {
 	dir := setupDir(t, map[string]string{
 		"main.tf": `data "aws_iam_policy_document" "p" {

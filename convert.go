@@ -87,12 +87,9 @@ func (c *Converter) Run(inPlace bool) error {
 	if c.Err == nil {
 		c.Err = os.Stderr
 	}
-	if c.files == nil {
-		c.files = map[string]*hclwrite.File{}
-	}
-	if c.policies == nil {
-		c.policies = map[string]*policy{}
-	}
+	// Reset per-run state so a Converter instance can be reused safely.
+	c.files = map[string]*hclwrite.File{}
+	c.policies = map[string]*policy{}
 
 	if err := c.load(); err != nil {
 		return err
@@ -105,6 +102,13 @@ func (c *Converter) Run(inPlace bool) error {
 }
 
 func (c *Converter) load() error {
+	info, err := os.Stat(c.Dir)
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", c.Dir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", c.Dir)
+	}
 	pattern := filepath.Join(c.Dir, "*.tf")
 	matches, err := filepath.Glob(pattern)
 	if err != nil {

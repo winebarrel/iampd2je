@@ -67,8 +67,9 @@ resource "aws_iam_role_policy" "bucket_read" {
 iampd2j -i .
 ```
 
+After running, `policies.tf` becomes:
+
 ```hcl
-# policies.tf (rewritten)
 resource "aws_iam_role_policy" "bucket_read" {
   role = aws_iam_role.example.id
   policy = jsonencode({
