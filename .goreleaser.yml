@@ -10,3 +10,16 @@ builds:
       - CGO_ENABLED=0
 checksum:
   name_template: "checksums.txt"
+homebrew_casks:
+  - repository:
+      owner: winebarrel
+      name: homebrew-iampd2j
+    homepage: https://github.com/winebarrel/iampd2j
+    description: Convert Terraform aws_iam_policy_document data sources to inline jsonencode() expressions
+    license: MIT
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/iampd2j"]
+          end

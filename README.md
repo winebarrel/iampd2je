@@ -9,7 +9,7 @@
 ## Installation
 
 ```
-go install github.com/winebarrel/iampd2j/cmd/iampd2j@latest
+brew install winebarrel/iampd2j/iampd2j
 ```
 
 ## Usage
