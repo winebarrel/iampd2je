@@ -1,7 +1,6 @@
 package main
 
 import (
-	"io"
 	"log"
 	"os"
 
@@ -16,7 +15,9 @@ func init() {
 }
 
 type options struct {
-	Files   []string `arg:"" optional:"" help:"Terraform files to convert. Reads from stdin if no files are given or \"-\" is passed."`
+	Dir     string `arg:"" optional:"" default:"." help:"Directory containing *.tf files (default: \".\")."`
+	InPlace bool   `short:"i" help:"Write changes back to files instead of stdout."`
+	Verbose bool   `short:"v" help:"Verbose logging."`
 	Version kong.VersionFlag
 }
 
@@ -24,53 +25,21 @@ func parseArgs() *options {
 	opts := &options{}
 	parser := kong.Must(opts,
 		kong.Name("iampd2j"),
-		kong.Description("Convert aws_iam_policy_document data sources to jsonencode() expressions."),
+		kong.Description("Inline aws_iam_policy_document data sources as jsonencode() expressions."),
 		kong.Vars{"version": version},
 	)
 	parser.Model.HelpFlag.Help = "Show help."
-
 	if _, err := parser.Parse(os.Args[1:]); err != nil {
 		parser.FatalIfErrorf(err)
 	}
-
 	return opts
 }
 
 func main() {
 	opts := parseArgs()
-	conv := iampd2j.NewConverter()
-
-	if len(opts.Files) == 0 {
-		opts.Files = []string{"-"}
+	c := iampd2j.NewConverter(opts.Dir)
+	c.Verbose = opts.Verbose
+	if err := c.Run(opts.InPlace); err != nil {
+		log.Fatalf("error: %v", err)
 	}
-
-	for _, f := range opts.Files {
-		var r io.ReadCloser
-
-		if f == "-" {
-			r = io.NopCloser(os.Stdin)
-		} else {
-			var err error
-			r, err = os.Open(f)
-
-			if err != nil {
-				log.Fatal(err)
-			}
-		}
-
-		if err := convert(conv, r, f); err != nil {
-			log.Fatal(err)
-		}
-	}
-}
-
-func convert(conv *iampd2j.Converter, src io.ReadCloser, filename string) error {
-	defer src.Close()
-	bs, err := io.ReadAll(src)
-
-	if err != nil {
-		return err
-	}
-
-	return conv.Convert(bs, filename)
 }
