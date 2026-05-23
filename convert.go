@@ -352,8 +352,12 @@ func (c *Converter) sortedPaths() []string {
 
 // matchPolicyDocRef matches `data . aws_iam_policy_document . NAME . ATTR`
 // starting at tokens[i]. It returns the policy name, the trailing attribute
-// name, the number of tokens consumed, and whether the match succeeded. A
-// preceding dot disqualifies the match so we don't confuse a chained access.
+// name, the number of tokens consumed, and whether the match succeeded.
+//
+// A preceding dot disqualifies the match so we don't confuse a chained
+// access. Likewise, a trailing dot or `[` disqualifies the match — splicing
+// a jsonencode expression in place of e.g. `data.X.Y.json.foo` would yield
+// `jsonencode(...).foo`, which isn't valid HCL on a string-typed result.
 func matchPolicyDocRef(t hclwrite.Tokens, i int) (string, string, int, bool) {
 	if i+6 >= len(t) {
 		return "", "", 0, false
@@ -381,6 +385,12 @@ func matchPolicyDocRef(t hclwrite.Tokens, i int) (string, string, int, bool) {
 	}
 	if t[i+6].Type != hclsyntax.TokenIdent {
 		return "", "", 0, false
+	}
+	if i+7 < len(t) {
+		switch t[i+7].Type {
+		case hclsyntax.TokenDot, hclsyntax.TokenOBrack:
+			return "", "", 0, false
+		}
 	}
 	return string(t[i+4].Bytes), string(t[i+6].Bytes), 7, true
 }

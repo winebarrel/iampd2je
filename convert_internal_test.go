@@ -126,6 +126,18 @@ func TestMatchPolicyDocRef_Tok6NotIdent(t *testing.T) {
 	assert.False(t, ok)
 }
 
+func TestMatchPolicyDocRef_TrailingDot(t *testing.T) {
+	toks := tokensOf(t, "data.aws_iam_policy_document.p.json.something")
+	_, _, _, ok := matchPolicyDocRef(toks, 0)
+	assert.False(t, ok)
+}
+
+func TestMatchPolicyDocRef_TrailingBracket(t *testing.T) {
+	toks := tokensOf(t, "data.aws_iam_policy_document.p.json[0]")
+	_, _, _, ok := matchPolicyDocRef(toks, 0)
+	assert.False(t, ok)
+}
+
 func TestMatchPolicyDocRef_OK(t *testing.T) {
 	toks := tokensOf(t, "data.aws_iam_policy_document.policy_name.json")
 	name, attr, n, ok := matchPolicyDocRef(toks, 0)
