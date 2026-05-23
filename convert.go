@@ -217,15 +217,17 @@ func (c *Converter) scanTokenRefs(tokens hclwrite.Tokens, inPolicyDoc bool, path
 		}
 		pol, has := c.policies[name]
 		if has && pol.convertible {
-			switch {
-			case inPolicyDoc:
-				pol.keepBlock = true
-			case attr != "json":
+			// A non-`.json` accessor is always worth warning about, no
+			// matter where the ref appears — the user has an unsupported
+			// access in their code that we can't fold into jsonencode.
+			if attr != "json" {
 				if !pol.warnedNonJSON {
 					fmt.Fprintf(c.Err, "warning: %s: data.%s.%s.%s is not supported; leaving %s.%s in place\n",
 						path, policyDocType, name, attr, policyDocType, name)
 					pol.warnedNonJSON = true
 				}
+				pol.keepBlock = true
+			} else if inPolicyDoc {
 				pol.keepBlock = true
 			}
 		}

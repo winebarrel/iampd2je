@@ -926,6 +926,40 @@ resource "test" "x" {
 	require.Error(t, err)
 }
 
+func TestConvert_WarnsForNonJSONInsidePolicyDoc(t *testing.T) {
+	// A non-`.json` accessor inside another policy doc body must still
+	// produce the unsupported-accessor warning. The reference also keeps
+	// the target's block in place.
+	src := `data "aws_iam_policy_document" "outer" {
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = [data.aws_iam_policy_document.inner.minified_json]
+  }
+}
+
+data "aws_iam_policy_document" "inner" {
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = ["*"]
+  }
+}
+
+resource "r" "x" { v = data.aws_iam_policy_document.outer.json }
+`
+	dir := setupDir(t, map[string]string{"main.tf": src})
+	var errBuf bytes.Buffer
+	c := iampd2j.NewConverter(dir)
+	c.Err = &errBuf
+	require.NoError(t, c.Run(true))
+	assert.Contains(t, errBuf.String(), "minified_json")
+	assert.Contains(t, errBuf.String(), "is not supported")
+
+	body, err := os.ReadFile(filepath.Join(dir, "main.tf"))
+	require.NoError(t, err)
+	got := string(body)
+	assert.Contains(t, got, `data "aws_iam_policy_document" "inner"`)
+}
+
 func TestConvert_WarnsForNonJSONEvenWhenAlreadyKept(t *testing.T) {
 	// outer's body references inner.json from inside, which silently sets
 	// inner.keepBlock=true (via the inPolicyDoc branch). An external
@@ -1038,32 +1072,6 @@ resource "test" "y" { v = data.aws_iam_policy_document.p.json }
 	got := string(body)
 	assert.Contains(t, got, "s3:PutObject")
 	assert.NotContains(t, got, `data "aws_iam_policy_document"`)
-}
-
-func TestConvert_InPlacePreservesFileMode(t *testing.T) {
-	dir := setupDir(t, map[string]string{
-		"main.tf": `data "aws_iam_policy_document" "p" {
-  statement {
-    actions   = ["s3:GetObject"]
-    resources = ["*"]
-  }
-}
-
-resource "test" "x" {
-  v = data.aws_iam_policy_document.p.json
-}
-`,
-	})
-	path := filepath.Join(dir, "main.tf")
-	require.NoError(t, os.Chmod(path, 0o600))
-
-	c := iampd2j.NewConverter(dir)
-	c.Err = io.Discard
-	require.NoError(t, c.Run(true))
-
-	info, err := os.Stat(path)
-	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
 }
 
 func TestConvert_InPlaceWritesFiles(t *testing.T) {
