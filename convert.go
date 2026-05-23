@@ -45,9 +45,11 @@ type Converter struct {
 //     persist via the surviving outer body or via the spliced tokens at
 //     the reference sites).
 //
-// `.json` references to convertible policies are always replaced with the
+// External `.json` references to convertible policies are replaced with the
 // jsonencode expression regardless of keepBlock, since the replacement is
-// self-contained.
+// self-contained. References *inside* policy doc bodies are left untouched
+// — they either get spliced as-is at the outer's reference sites (for
+// removable outers) or persist in the kept outer's body (for kept outers).
 type policy struct {
 	name        string
 	path        string
@@ -183,8 +185,17 @@ func (c *Converter) scanReferences() {
 }
 
 func (c *Converter) scanBodyRefs(body *hclwrite.Body, inPolicyDoc bool, path string) {
-	for _, attr := range body.Attributes() {
-		c.scanTokenRefs(attr.Expr().BuildTokens(nil), inPolicyDoc, path)
+	// body.Attributes() returns a map; sort by name so any warning we emit
+	// uses a deterministic attribute name when a policy has multiple
+	// non-`.json` accessors in the same body.
+	attrs := body.Attributes()
+	names := make([]string, 0, len(attrs))
+	for n := range attrs {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		c.scanTokenRefs(attrs[n].Expr().BuildTokens(nil), inPolicyDoc, path)
 	}
 	for _, blk := range body.Blocks() {
 		next := inPolicyDoc || isPolicyDocBlock(blk)

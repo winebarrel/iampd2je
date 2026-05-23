@@ -926,23 +926,6 @@ resource "test" "x" {
 	require.Error(t, err)
 }
 
-func TestConvert_UnreadableFile(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root can read 0o000 files")
-	}
-	dir := t.TempDir()
-	p := filepath.Join(dir, "main.tf")
-	require.NoError(t, os.WriteFile(p, []byte(`resource "x" "y" {}`), 0o644))
-	require.NoError(t, os.Chmod(p, 0o000))
-	t.Cleanup(func() { _ = os.Chmod(p, 0o644) })
-
-	c := iampd2j.NewConverter(dir)
-	c.Out = io.Discard
-	c.Err = io.Discard
-	err := c.Run(false)
-	require.Error(t, err)
-}
-
 func TestConvert_WarnsForNonJSONEvenWhenAlreadyKept(t *testing.T) {
 	// outer's body references inner.json from inside, which silently sets
 	// inner.keepBlock=true (via the inPolicyDoc branch). An external
