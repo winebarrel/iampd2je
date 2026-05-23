@@ -452,6 +452,138 @@ resource "test" "x" {
 	assert.NotContains(t, got, "jsonencode({")
 }
 
+func TestConvert_MixedJSONAndMinifiedRef(t *testing.T) {
+	// When both .json and .minified_json refer to the same policy, the .json
+	// site is still replaced with jsonencode but the data block stays so that
+	// the .minified_json site keeps resolving.
+	src := `data "aws_iam_policy_document" "p" {
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = ["*"]
+  }
+}
+
+resource "a" "x" { v = data.aws_iam_policy_document.p.json }
+resource "b" "x" { v = data.aws_iam_policy_document.p.minified_json }
+`
+	dir := setupDir(t, map[string]string{"main.tf": src})
+	var errBuf bytes.Buffer
+	c := iampd2j.NewConverter(dir)
+	c.Err = &errBuf
+	require.NoError(t, c.Run(true))
+
+	body, err := os.ReadFile(filepath.Join(dir, "main.tf"))
+	require.NoError(t, err)
+	got := string(body)
+	assert.Contains(t, errBuf.String(), "minified_json")
+	assert.Contains(t, got, `data "aws_iam_policy_document" "p"`)
+	assert.Contains(t, got, "jsonencode({")
+	assert.Contains(t, got, "data.aws_iam_policy_document.p.minified_json")
+	assert.NotContains(t, got, "data.aws_iam_policy_document.p.json\n")
+}
+
+func TestConvert_SourcePolicyDocumentsChainedJSONKeepsBoth(t *testing.T) {
+	// merged is non-convertible (source_policy_documents). Its body contains
+	// data.base.json, so base must be kept even though base is convertible
+	// and only otherwise referenced via .json.
+	src := `data "aws_iam_policy_document" "base" {
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = ["*"]
+  }
+}
+
+data "aws_iam_policy_document" "merged" {
+  source_policy_documents = [data.aws_iam_policy_document.base.json]
+  statement {
+    actions   = ["s3:PutObject"]
+    resources = ["*"]
+  }
+}
+
+resource "r" "x" { v = data.aws_iam_policy_document.merged.json }
+`
+	dir := setupDir(t, map[string]string{"main.tf": src})
+	c := iampd2j.NewConverter(dir)
+	c.Err = io.Discard
+	require.NoError(t, c.Run(true))
+
+	body, err := os.ReadFile(filepath.Join(dir, "main.tf"))
+	require.NoError(t, err)
+	got := string(body)
+	assert.Contains(t, got, `data "aws_iam_policy_document" "base"`)
+	assert.Contains(t, got, `data "aws_iam_policy_document" "merged"`)
+	assert.Contains(t, got, "data.aws_iam_policy_document.base.json")
+	assert.Contains(t, got, "data.aws_iam_policy_document.merged.json")
+}
+
+func TestConvert_SourcePolicyDocumentsChainedMinifiedKeepsBoth(t *testing.T) {
+	src := `data "aws_iam_policy_document" "base" {
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = ["*"]
+  }
+}
+
+data "aws_iam_policy_document" "merged" {
+  source_policy_documents = [data.aws_iam_policy_document.base.minified_json]
+  statement {
+    actions   = ["s3:PutObject"]
+    resources = ["*"]
+  }
+}
+
+resource "r" "x" { v = data.aws_iam_policy_document.merged.json }
+`
+	dir := setupDir(t, map[string]string{"main.tf": src})
+	c := iampd2j.NewConverter(dir)
+	c.Err = io.Discard
+	require.NoError(t, c.Run(true))
+
+	body, err := os.ReadFile(filepath.Join(dir, "main.tf"))
+	require.NoError(t, err)
+	got := string(body)
+	assert.Contains(t, got, `data "aws_iam_policy_document" "base"`)
+	assert.Contains(t, got, `data "aws_iam_policy_document" "merged"`)
+}
+
+func TestConvert_RemovableXReferencesYKeepsY(t *testing.T) {
+	// X is convertible and gets removed; its statement.resources references
+	// data.Y.json which ends up spliced at the external .json reference site.
+	// Y must therefore be kept.
+	src := `data "aws_iam_policy_document" "y" {
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = ["*"]
+  }
+}
+
+data "aws_iam_policy_document" "x" {
+  statement {
+    actions   = ["s3:PutObject"]
+    resources = [data.aws_iam_policy_document.y.json]
+  }
+}
+
+resource "r" "x" { v = data.aws_iam_policy_document.x.json }
+`
+	dir := setupDir(t, map[string]string{"main.tf": src})
+	c := iampd2j.NewConverter(dir)
+	c.Err = io.Discard
+	require.NoError(t, c.Run(true))
+
+	body, err := os.ReadFile(filepath.Join(dir, "main.tf"))
+	require.NoError(t, err)
+	got := string(body)
+	// x is removed (no surviving non-.json refs to x outside the policy doc)
+	assert.NotContains(t, got, `data "aws_iam_policy_document" "x"`)
+	// y is kept because the spliced jsonencode for x still references y.json
+	assert.Contains(t, got, `data "aws_iam_policy_document" "y"`)
+	// the spliced jsonencode appears at the external ref site
+	assert.Contains(t, got, "jsonencode({")
+	assert.Contains(t, got, "data.aws_iam_policy_document.y.json")
+}
+
 func TestConvert_NonJSONRefWarnsAndKeepsBlock(t *testing.T) {
 	src := `data "aws_iam_policy_document" "p" {
   statement {

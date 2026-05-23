@@ -32,12 +32,29 @@ type Converter struct {
 }
 
 // policy holds per-data-source state collected during the first pass.
+//
+// convertible is false for blocks that use source_policy_documents or
+// override_policy_documents — those are emitted to stderr as a warning and
+// left in place because we can't fold their merge semantics into a single
+// jsonencode expression. convertible == false implies keepBlock == true.
+//
+// keepBlock is set during reference scanning. The block must stay in the file
+// if any surviving reference would otherwise dangle:
+//   - a non-`.json` attribute access from anywhere (`.minified_json` etc.),
+//   - or any reference from inside another policy doc body (those refs
+//     persist via the surviving outer body or via the spliced tokens at
+//     the reference sites).
+//
+// `.json` references to convertible policies are always replaced with the
+// jsonencode expression regardless of keepBlock, since the replacement is
+// self-contained.
 type policy struct {
-	name   string
-	path   string
-	block  *hclwrite.Block
-	tokens hclwrite.Tokens // jsonencode({...}) expression tokens; nil if skip
-	skip   bool            // true → do not rewrite refs and do not remove block
+	name        string
+	path        string
+	block       *hclwrite.Block
+	tokens      hclwrite.Tokens // jsonencode({...}) tokens; nil if !convertible
+	convertible bool
+	keepBlock   bool
 }
 
 // NewConverter returns a Converter that reads *.tf files from dir.
@@ -116,16 +133,17 @@ func (c *Converter) collectPolicies() error {
 			if existing, dup := c.policies[name]; dup {
 				return fmt.Errorf("duplicate data %s.%s (in %s and %s)", policyDocType, name, existing.path, p)
 			}
-			pol := &policy{name: name, path: p, block: block}
+			pol := &policy{name: name, path: p, block: block, convertible: true}
 
 			for _, unsupported := range []string{"source_policy_documents", "override_policy_documents"} {
 				if block.Body().GetAttribute(unsupported) != nil {
 					fmt.Fprintf(c.Err, "warning: %s: %s.%s uses %s; merge manually\n", p, policyDocType, name, unsupported)
-					pol.skip = true
+					pol.convertible = false
+					pol.keepBlock = true
 				}
 			}
 
-			if !pol.skip {
+			if pol.convertible {
 				s, err := convertPolicy(block.Body())
 				if err != nil {
 					return fmt.Errorf("%s: %s.%s: %w", p, policyDocType, name, err)
@@ -142,29 +160,32 @@ func (c *Converter) collectPolicies() error {
 	return nil
 }
 
-// scanReferences detects non-`.json` accesses on a known policy data source
-// (e.g. `.minified_json`) and marks those policies as skip so their data block
-// is left in place and references are not rewritten. Scan only visits bodies
-// outside of policy data blocks; chained policy refs are not analyzed.
+// scanReferences walks every body in every file and decides, for each
+// convertible policy, whether its data block must be kept (keepBlock).
+//
+// The single pass is enough because the rule does not depend on iteration
+// order: a convertible policy is kept iff
+//   - it is referenced via a non-`.json` attribute from a non-policy-doc body,
+//   - or it is referenced (with any attribute) from inside any policy doc
+//     body — those refs persist either via the kept outer body or via the
+//     tokens that get spliced at the outer's reference sites.
 func (c *Converter) scanReferences() {
 	for path, f := range c.files {
-		c.scanBodyRefs(f.Body(), path)
+		c.scanBodyRefs(f.Body(), false, path)
 	}
 }
 
-func (c *Converter) scanBodyRefs(body *hclwrite.Body, path string) {
+func (c *Converter) scanBodyRefs(body *hclwrite.Body, inPolicyDoc bool, path string) {
 	for _, attr := range body.Attributes() {
-		c.scanTokenRefs(attr.Expr().BuildTokens(nil), path)
+		c.scanTokenRefs(attr.Expr().BuildTokens(nil), inPolicyDoc, path)
 	}
 	for _, blk := range body.Blocks() {
-		if isPolicyDocBlock(blk) {
-			continue
-		}
-		c.scanBodyRefs(blk.Body(), path)
+		next := inPolicyDoc || isPolicyDocBlock(blk)
+		c.scanBodyRefs(blk.Body(), next, path)
 	}
 }
 
-func (c *Converter) scanTokenRefs(tokens hclwrite.Tokens, path string) {
+func (c *Converter) scanTokenRefs(tokens hclwrite.Tokens, inPolicyDoc bool, path string) {
 	i := 0
 	for i < len(tokens) {
 		name, attr, n, ok := matchPolicyDocRef(tokens, i)
@@ -173,10 +194,17 @@ func (c *Converter) scanTokenRefs(tokens hclwrite.Tokens, path string) {
 			continue
 		}
 		pol, has := c.policies[name]
-		if has && attr != "json" && !pol.skip {
-			fmt.Fprintf(c.Err, "warning: %s: data.%s.%s.%s is not supported; leaving %s.%s in place\n",
-				path, policyDocType, name, attr, policyDocType, name)
-			pol.skip = true
+		if has && pol.convertible {
+			switch {
+			case inPolicyDoc:
+				pol.keepBlock = true
+			case attr != "json":
+				if !pol.keepBlock {
+					fmt.Fprintf(c.Err, "warning: %s: data.%s.%s.%s is not supported; leaving %s.%s in place\n",
+						path, policyDocType, name, attr, policyDocType, name)
+				}
+				pol.keepBlock = true
+			}
 		}
 		i += n
 	}
@@ -193,7 +221,7 @@ func (c *Converter) rewriteAll(inPlace bool) error {
 			}
 			name := blk.Labels()[1]
 			pol, ok := c.policies[name]
-			if !ok || pol.skip || pol.path != p {
+			if !ok || !pol.convertible || pol.keepBlock || pol.path != p {
 				continue
 			}
 			f.Body().RemoveBlock(blk)
@@ -265,7 +293,7 @@ func (c *Converter) replaceRefsInTokens(in hclwrite.Tokens, path string) (hclwri
 			continue
 		}
 		pol, has := c.policies[name]
-		if !has || pol.skip || attr != "json" {
+		if !has || !pol.convertible || attr != "json" {
 			out = append(out, in[i:i+n]...)
 			i += n
 			continue
