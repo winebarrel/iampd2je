@@ -47,9 +47,19 @@ data "aws_iam_policy_document" "full" {
   }
 
   statement {
-    sid       = "DenyDeletes"
-    effect    = "Deny"
+    sid         = "DenyDeletes"
+    effect      = "Deny"
     not_actions = ["s3:DeleteObject"]
-    resources = ["*"]
+    resources   = ["*"]
   }
+}
+
+resource "aws_iam_role_policy" "simple" {
+  role   = "example"
+  policy = data.aws_iam_policy_document.simple.json
+}
+
+resource "aws_iam_role_policy" "full" {
+  role   = "example"
+  policy = data.aws_iam_policy_document.full.json
 }

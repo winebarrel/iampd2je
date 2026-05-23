@@ -2,7 +2,9 @@ package iampd2j_test
 
 import (
 	"bytes"
+	"errors"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,23 +15,112 @@ import (
 	"github.com/winebarrel/iampd2j"
 )
 
+// setupDir writes the given files to a fresh temp directory and returns its path.
+func setupDir(t *testing.T, files map[string]string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for name, content := range files {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644))
+	}
+	return dir
+}
+
+// run executes Converter.Run in non-in-place mode and returns its captured streams.
+func run(t *testing.T, files map[string]string) (out, errOut string, err error) {
+	t.Helper()
+	dir := setupDir(t, files)
+	var outBuf, errBuf bytes.Buffer
+	c := iampd2j.NewConverter(dir)
+	c.Out = &outBuf
+	c.Err = &errBuf
+	err = c.Run(false)
+	return outBuf.String(), errBuf.String(), err
+}
+
 func TestConvert_Golden(t *testing.T) {
-	src, err := os.ReadFile(filepath.Join("testdata", "sample.tf"))
+	inSrc, err := os.ReadFile(filepath.Join("testdata", "sample.tf"))
 	require.NoError(t, err)
-	want, err := os.ReadFile(filepath.Join("testdata", "sample.golden.tf"))
+	wantBytes, err := os.ReadFile(filepath.Join("testdata", "sample.golden.tf"))
 	require.NoError(t, err)
 
-	var out, errOut bytes.Buffer
-	c := &iampd2j.Converter{Out: &out, Err: &errOut}
-	require.NoError(t, c.Convert(src, "sample.tf"))
+	dir := t.TempDir()
+	p := filepath.Join(dir, "sample.tf")
+	require.NoError(t, os.WriteFile(p, inSrc, 0o644))
 
-	assert.Equal(t, string(want), out.String())
+	var errOut bytes.Buffer
+	c := iampd2j.NewConverter(dir)
+	c.Err = &errOut
+	require.NoError(t, c.Run(true))
+
+	got, err := os.ReadFile(p)
+	require.NoError(t, err)
+	assert.Equal(t, string(wantBytes), string(got))
 	assert.Empty(t, errOut.String())
 }
 
-func TestConvert_DefaultsAndSkipsOtherBlocks(t *testing.T) {
-	src := []byte(`
-resource "aws_s3_bucket" "ignored" {
+func TestConvert_StdoutHasFileHeader(t *testing.T) {
+	out, _, err := run(t, map[string]string{
+		"main.tf": `data "aws_iam_policy_document" "p" {
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = ["*"]
+  }
+}
+
+resource "test" "x" {
+  v = data.aws_iam_policy_document.p.json
+}
+`,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, out, "### ")
+	assert.Contains(t, out, "main.tf ###")
+	assert.Contains(t, out, "jsonencode({")
+}
+
+func TestConvert_DataBlockRemovedAndRefReplaced(t *testing.T) {
+	out, _, err := run(t, map[string]string{
+		"main.tf": `data "aws_iam_policy_document" "p" {
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = ["*"]
+  }
+}
+
+resource "test" "x" {
+  v = data.aws_iam_policy_document.p.json
+}
+`,
+	})
+	require.NoError(t, err)
+	assert.NotContains(t, out, `data "aws_iam_policy_document"`)
+	assert.NotContains(t, out, "data.aws_iam_policy_document.p.json")
+	assert.Contains(t, out, "jsonencode({")
+}
+
+func TestConvert_RefAcrossFiles(t *testing.T) {
+	out, _, err := run(t, map[string]string{
+		"policies.tf": `data "aws_iam_policy_document" "p" {
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = ["*"]
+  }
+}
+`,
+		"main.tf": `resource "test" "x" {
+  v = data.aws_iam_policy_document.p.json
+}
+`,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, out, "main.tf ###")
+	assert.Contains(t, out, "policies.tf ###")
+	assert.Contains(t, out, "jsonencode({")
+}
+
+func TestConvert_OtherDataBlocksUntouched(t *testing.T) {
+	out, _, err := run(t, map[string]string{
+		"main.tf": `resource "aws_s3_bucket" "ignored" {
   bucket = "x"
 }
 
@@ -41,22 +132,22 @@ data "aws_iam_policy_document" "p" {
     resources = ["*"]
   }
 }
-`)
-	var out bytes.Buffer
-	c := &iampd2j.Converter{Out: &out}
-	require.NoError(t, c.Convert(src, "in.tf"))
 
-	got := out.String()
-	assert.Contains(t, got, "# p")
-	assert.Regexp(t, `Version\s*=\s*"2012-10-17"`, got)
-	assert.Regexp(t, `Effect\s*=\s*"Allow"`, got)
-	assert.NotContains(t, got, "aws_s3_bucket")
-	assert.NotContains(t, got, "aws_caller_identity")
+resource "test" "x" {
+  v = data.aws_iam_policy_document.p.json
+}
+`,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, out, `resource "aws_s3_bucket" "ignored"`)
+	assert.Contains(t, out, `data "aws_caller_identity" "ignored"`)
+	assert.Regexp(t, `Version\s*=\s*"2012-10-17"`, out)
+	assert.Regexp(t, `Effect\s*=\s*"Allow"`, out)
 }
 
 func TestConvert_PrincipalsMergeSameType(t *testing.T) {
-	src := []byte(`
-data "aws_iam_policy_document" "p" {
+	out, _, err := run(t, map[string]string{
+		"main.tf": `data "aws_iam_policy_document" "p" {
   statement {
     actions = ["sts:AssumeRole"]
     principals {
@@ -69,19 +160,21 @@ data "aws_iam_policy_document" "p" {
     }
   }
 }
-`)
-	var out bytes.Buffer
-	c := &iampd2j.Converter{Out: &out}
-	require.NoError(t, c.Convert(src, "in.tf"))
-	got := out.String()
-	assert.Contains(t, got,
+
+resource "test" "x" {
+  v = data.aws_iam_policy_document.p.json
+}
+`,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, out,
 		`AWS = ["arn:aws:iam::111:role/a", "arn:aws:iam::222:role/b", "arn:aws:iam::222:role/c"]`)
-	assert.NotContains(t, got, "concat(")
+	assert.NotContains(t, out, "concat(")
 }
 
 func TestConvert_PrincipalsMergeNonLiteralFails(t *testing.T) {
-	src := []byte(`
-data "aws_iam_policy_document" "p" {
+	_, _, err := run(t, map[string]string{
+		"main.tf": `data "aws_iam_policy_document" "p" {
   statement {
     actions = ["sts:AssumeRole"]
     principals {
@@ -94,17 +187,15 @@ data "aws_iam_policy_document" "p" {
     }
   }
 }
-`)
-	var out bytes.Buffer
-	c := &iampd2j.Converter{Out: &out}
-	err := c.Convert(src, "in.tf")
+`,
+	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "list literals")
 }
 
 func TestConvert_PrincipalsMergeForExprFails(t *testing.T) {
-	src := []byte(`
-data "aws_iam_policy_document" "p" {
+	_, _, err := run(t, map[string]string{
+		"main.tf": `data "aws_iam_policy_document" "p" {
   statement {
     actions = ["sts:AssumeRole"]
     principals {
@@ -117,17 +208,15 @@ data "aws_iam_policy_document" "p" {
     }
   }
 }
-`)
-	var out bytes.Buffer
-	c := &iampd2j.Converter{Out: &out}
-	err := c.Convert(src, "in.tf")
+`,
+	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "list literals")
 }
 
 func TestConvert_PrincipalTypeDynamicKey(t *testing.T) {
-	src := []byte(`
-data "aws_iam_policy_document" "p" {
+	out, _, err := run(t, map[string]string{
+		"main.tf": `data "aws_iam_policy_document" "p" {
   statement {
     actions = ["sts:AssumeRole"]
     principals {
@@ -136,17 +225,19 @@ data "aws_iam_policy_document" "p" {
     }
   }
 }
-`)
-	var out bytes.Buffer
-	c := &iampd2j.Converter{Out: &out, Err: io.Discard}
-	require.NoError(t, c.Convert(src, "in.tf"))
-	got := out.String()
-	assert.Contains(t, got, "(var.principal_type) = [")
+
+resource "test" "x" {
+  v = data.aws_iam_policy_document.p.json
+}
+`,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, out, "(var.principal_type) = [")
 }
 
 func TestConvert_PrincipalTypeMixedLiteralAndDynamic(t *testing.T) {
-	src := []byte(`
-data "aws_iam_policy_document" "p" {
+	out, _, err := run(t, map[string]string{
+		"main.tf": `data "aws_iam_policy_document" "p" {
   statement {
     actions = ["sts:AssumeRole"]
     principals {
@@ -163,19 +254,21 @@ data "aws_iam_policy_document" "p" {
     }
   }
 }
-`)
-	var out bytes.Buffer
-	c := &iampd2j.Converter{Out: &out, Err: io.Discard}
-	require.NoError(t, c.Convert(src, "in.tf"))
-	got := out.String()
+
+resource "test" "x" {
+  v = data.aws_iam_policy_document.p.json
+}
+`,
+	})
+	require.NoError(t, err)
 	assert.Regexp(t,
-		`AWS\s*=\s*\["arn:aws:iam::111:role/a", "arn:aws:iam::222:role/b"\]`, got)
-	assert.Contains(t, got, "(var.extra_type)")
+		`AWS\s*=\s*\["arn:aws:iam::111:role/a", "arn:aws:iam::222:role/b"\]`, out)
+	assert.Contains(t, out, "(var.extra_type)")
 }
 
 func TestConvert_ConditionTestAndVariableDynamicKey(t *testing.T) {
-	src := []byte(`
-data "aws_iam_policy_document" "p" {
+	out, _, err := run(t, map[string]string{
+		"main.tf": `data "aws_iam_policy_document" "p" {
   statement {
     actions   = ["s3:GetObject"]
     resources = ["*"]
@@ -186,31 +279,35 @@ data "aws_iam_policy_document" "p" {
     }
   }
 }
-`)
-	var out bytes.Buffer
-	c := &iampd2j.Converter{Out: &out, Err: io.Discard}
-	require.NoError(t, c.Convert(src, "in.tf"))
-	got := out.String()
-	assert.Contains(t, got, "(var.cond_test) = {")
-	assert.Contains(t, got, "(var.cond_var) = [")
+
+resource "test" "x" {
+  v = data.aws_iam_policy_document.p.json
+}
+`,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, out, "(var.cond_test) = {")
+	assert.Contains(t, out, "(var.cond_var) = [")
 }
 
 func TestConvert_EmptyStatementListEmitted(t *testing.T) {
-	src := []byte(`
-data "aws_iam_policy_document" "p" {
+	out, _, err := run(t, map[string]string{
+		"main.tf": `data "aws_iam_policy_document" "p" {
   policy_id = "empty"
 }
-`)
-	var out bytes.Buffer
-	c := &iampd2j.Converter{Out: &out, Err: io.Discard}
-	require.NoError(t, c.Convert(src, "in.tf"))
-	got := out.String()
-	assert.Regexp(t, `Statement\s*=\s*\[\s*\]`, got)
+
+resource "test" "x" {
+  v = data.aws_iam_policy_document.p.json
+}
+`,
+	})
+	require.NoError(t, err)
+	assert.Regexp(t, `Statement\s*=\s*\[\s*\]`, out)
 }
 
 func TestConvert_ErrorIncludesFilenameAndPolicyName(t *testing.T) {
-	src := []byte(`
-data "aws_iam_policy_document" "broken" {
+	_, _, err := run(t, map[string]string{
+		"policies.tf": `data "aws_iam_policy_document" "broken" {
   statement {
     actions = ["sts:AssumeRole"]
     principals {
@@ -223,10 +320,8 @@ data "aws_iam_policy_document" "broken" {
     }
   }
 }
-`)
-	var out bytes.Buffer
-	c := &iampd2j.Converter{Out: &out, Err: io.Discard}
-	err := c.Convert(src, "policies.tf")
+`,
+	})
 	require.Error(t, err)
 	msg := err.Error()
 	assert.Contains(t, msg, "policies.tf")
@@ -234,8 +329,8 @@ data "aws_iam_policy_document" "broken" {
 }
 
 func TestConvert_NotPrincipalsAndNotResources(t *testing.T) {
-	src := []byte(`
-data "aws_iam_policy_document" "p" {
+	out, _, err := run(t, map[string]string{
+		"main.tf": `data "aws_iam_policy_document" "p" {
   statement {
     effect        = "Deny"
     actions       = ["s3:*"]
@@ -246,19 +341,21 @@ data "aws_iam_policy_document" "p" {
     }
   }
 }
-`)
-	var out bytes.Buffer
-	c := &iampd2j.Converter{Out: &out}
-	require.NoError(t, c.Convert(src, "in.tf"))
-	got := out.String()
-	assert.Regexp(t, `Effect\s*=\s*"Deny"`, got)
-	assert.Contains(t, got, "NotResource")
-	assert.Contains(t, got, "NotPrincipal")
+
+resource "test" "x" {
+  v = data.aws_iam_policy_document.p.json
+}
+`,
+	})
+	require.NoError(t, err)
+	assert.Regexp(t, `Effect\s*=\s*"Deny"`, out)
+	assert.Contains(t, out, "NotResource")
+	assert.Contains(t, out, "NotPrincipal")
 }
 
 func TestConvert_VersionAndPolicyIdOverride(t *testing.T) {
-	src := []byte(`
-data "aws_iam_policy_document" "p" {
+	out, _, err := run(t, map[string]string{
+		"main.tf": `data "aws_iam_policy_document" "p" {
   version   = "2008-10-17"
   policy_id = "custom-id"
   statement {
@@ -266,75 +363,162 @@ data "aws_iam_policy_document" "p" {
     resources = ["*"]
   }
 }
-`)
-	var out bytes.Buffer
-	c := &iampd2j.Converter{Out: &out}
-	require.NoError(t, c.Convert(src, "in.tf"))
-	got := out.String()
-	assert.Regexp(t, `Version\s*=\s*"2008-10-17"`, got)
-	assert.Regexp(t, `Id\s*=\s*"custom-id"`, got)
+
+resource "test" "x" {
+  v = data.aws_iam_policy_document.p.json
+}
+`,
+	})
+	require.NoError(t, err)
+	assert.Regexp(t, `Version\s*=\s*"2008-10-17"`, out)
+	assert.Regexp(t, `Id\s*=\s*"custom-id"`, out)
 }
 
-func TestConvert_NoPolicyDocumentBlocks(t *testing.T) {
-	src := []byte(`resource "aws_s3_bucket" "x" { bucket = "y" }`)
-	var out bytes.Buffer
-	c := &iampd2j.Converter{Out: &out}
-	err := c.Convert(src, "in.tf")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no aws_iam_policy_document blocks")
-	assert.Empty(t, out.String())
+func TestConvert_NoPolicyDocumentBlocks_NoOp(t *testing.T) {
+	out, errOut, err := run(t, map[string]string{
+		"main.tf": `resource "aws_s3_bucket" "x" { bucket = "y" }`,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, out)
+	assert.Empty(t, errOut)
 }
 
 func TestConvert_ParseError(t *testing.T) {
-	src := []byte(`data "aws_iam_policy_document" "p" {`) // unterminated
-	var out bytes.Buffer
-	c := &iampd2j.Converter{Out: &out}
-	err := c.Convert(src, "in.tf")
+	_, _, err := run(t, map[string]string{
+		"main.tf": `data "aws_iam_policy_document" "p" {`, // unterminated
+	})
 	require.Error(t, err)
 }
 
-func TestConvert_SourcePolicyDocumentsWarns(t *testing.T) {
-	src := []byte(`
-data "aws_iam_policy_document" "merged_policy" {
+func TestConvert_SourcePolicyDocumentsWarnsAndKeepsBlock(t *testing.T) {
+	src := `data "aws_iam_policy_document" "merged_policy" {
   source_policy_documents = [data.aws_iam_policy_document.base.json]
   statement {
     actions   = ["s3:GetObject"]
     resources = ["*"]
   }
 }
-`)
-	var out, errOut bytes.Buffer
-	c := &iampd2j.Converter{Out: &out, Err: &errOut}
-	require.NoError(t, c.Convert(src, "policies.tf"))
-	got := errOut.String()
-	assert.Contains(t, got, "source_policy_documents")
-	assert.Contains(t, got, "merge manually")
-	assert.Contains(t, got, "policies.tf")
-	assert.Contains(t, got, "merged_policy")
+
+resource "test" "x" {
+  v = data.aws_iam_policy_document.merged_policy.json
+}
+`
+	dir := setupDir(t, map[string]string{"policies.tf": src})
+	var outBuf, errBuf bytes.Buffer
+	c := iampd2j.NewConverter(dir)
+	c.Out = &outBuf
+	c.Err = &errBuf
+	require.NoError(t, c.Run(true))
+
+	assert.Contains(t, errBuf.String(), "source_policy_documents")
+	assert.Contains(t, errBuf.String(), "merge manually")
+	assert.Contains(t, errBuf.String(), "policies.tf")
+	assert.Contains(t, errBuf.String(), "merged_policy")
+	// the data block and reference are kept on disk
+	body, err := os.ReadFile(filepath.Join(dir, "policies.tf"))
+	require.NoError(t, err)
+	got := string(body)
+	assert.Contains(t, got, `data "aws_iam_policy_document" "merged_policy"`)
+	assert.Contains(t, got, "data.aws_iam_policy_document.merged_policy.json")
+	assert.NotContains(t, got, "jsonencode({")
 }
 
-func TestConvert_OverridePolicyDocumentsWarns(t *testing.T) {
-	src := []byte(`
-data "aws_iam_policy_document" "overridden_policy" {
+func TestConvert_OverridePolicyDocumentsWarnsAndKeepsBlock(t *testing.T) {
+	src := `data "aws_iam_policy_document" "overridden_policy" {
   override_policy_documents = [data.aws_iam_policy_document.base.json]
   statement {
     actions   = ["s3:GetObject"]
     resources = ["*"]
   }
 }
-`)
-	var out, errOut bytes.Buffer
-	c := &iampd2j.Converter{Out: &out, Err: &errOut}
-	require.NoError(t, c.Convert(src, "policies.tf"))
-	got := errOut.String()
-	assert.Contains(t, got, "override_policy_documents")
-	assert.Contains(t, got, "policies.tf")
-	assert.Contains(t, got, "overridden_policy")
+
+resource "test" "x" {
+  v = data.aws_iam_policy_document.overridden_policy.json
+}
+`
+	dir := setupDir(t, map[string]string{"policies.tf": src})
+	var errBuf bytes.Buffer
+	c := iampd2j.NewConverter(dir)
+	c.Err = &errBuf
+	require.NoError(t, c.Run(true))
+
+	assert.Contains(t, errBuf.String(), "override_policy_documents")
+	assert.Contains(t, errBuf.String(), "policies.tf")
+	assert.Contains(t, errBuf.String(), "overridden_policy")
+	body, err := os.ReadFile(filepath.Join(dir, "policies.tf"))
+	require.NoError(t, err)
+	got := string(body)
+	assert.Contains(t, got, `data "aws_iam_policy_document" "overridden_policy"`)
+	assert.NotContains(t, got, "jsonencode({")
+}
+
+func TestConvert_NonJSONRefWarnsAndKeepsBlock(t *testing.T) {
+	src := `data "aws_iam_policy_document" "p" {
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = ["*"]
+  }
+}
+
+resource "test" "x" {
+  v = data.aws_iam_policy_document.p.minified_json
+}
+`
+	dir := setupDir(t, map[string]string{"main.tf": src})
+	var errBuf bytes.Buffer
+	c := iampd2j.NewConverter(dir)
+	c.Err = &errBuf
+	require.NoError(t, c.Run(true))
+
+	assert.Contains(t, errBuf.String(), "minified_json")
+	body, err := os.ReadFile(filepath.Join(dir, "main.tf"))
+	require.NoError(t, err)
+	got := string(body)
+	assert.Contains(t, got, `data "aws_iam_policy_document" "p"`)
+	assert.Contains(t, got, "data.aws_iam_policy_document.p.minified_json")
+	assert.NotContains(t, got, "jsonencode({")
+}
+
+func TestConvert_NoReferencesStillRemovesBlock(t *testing.T) {
+	// A dead policy with no references is still removed once it is
+	// successfully convertible.
+	out, _, err := run(t, map[string]string{
+		"main.tf": `data "aws_iam_policy_document" "p" {
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = ["*"]
+  }
+}
+`,
+	})
+	require.NoError(t, err)
+	assert.NotContains(t, out, `data "aws_iam_policy_document" "p"`)
+}
+
+func TestConvert_DuplicatePolicyNameFails(t *testing.T) {
+	_, _, err := run(t, map[string]string{
+		"a.tf": `data "aws_iam_policy_document" "p" {
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = ["*"]
+  }
+}
+`,
+		"b.tf": `data "aws_iam_policy_document" "p" {
+  statement {
+    actions   = ["s3:PutObject"]
+    resources = ["*"]
+  }
+}
+`,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "duplicate")
 }
 
 func TestConvert_ConditionVariableWithDollarSign(t *testing.T) {
-	src := []byte(`
-data "aws_iam_policy_document" "p" {
+	out, _, err := run(t, map[string]string{
+		"main.tf": `data "aws_iam_policy_document" "p" {
   statement {
     actions   = ["s3:GetObject"]
     resources = ["*"]
@@ -345,16 +529,19 @@ data "aws_iam_policy_document" "p" {
     }
   }
 }
-`)
-	var out bytes.Buffer
-	c := &iampd2j.Converter{Out: &out}
-	require.NoError(t, c.Convert(src, "in.tf"))
-	assert.Contains(t, out.String(), `"aws:foo$bar" = ["x"]`)
+
+resource "test" "x" {
+  v = data.aws_iam_policy_document.p.json
+}
+`,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, out, `"aws:foo$bar" = ["x"]`)
 }
 
 func TestConvert_PrincipalBlockMissingFields(t *testing.T) {
-	src := []byte(`
-data "aws_iam_policy_document" "p" {
+	_, _, err := run(t, map[string]string{
+		"main.tf": `data "aws_iam_policy_document" "p" {
   statement {
     actions = ["sts:AssumeRole"]
     principals {
@@ -362,17 +549,15 @@ data "aws_iam_policy_document" "p" {
     }
   }
 }
-`)
-	var out bytes.Buffer
-	c := &iampd2j.Converter{Out: &out}
-	err := c.Convert(src, "in.tf")
+`,
+	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "type and identifiers")
 }
 
 func TestConvert_ConditionMergeSameTestAndVariable(t *testing.T) {
-	src := []byte(`
-data "aws_iam_policy_document" "p" {
+	out, _, err := run(t, map[string]string{
+		"main.tf": `data "aws_iam_policy_document" "p" {
   statement {
     actions   = ["s3:GetObject"]
     resources = ["*"]
@@ -388,19 +573,21 @@ data "aws_iam_policy_document" "p" {
     }
   }
 }
-`)
-	var out bytes.Buffer
-	c := &iampd2j.Converter{Out: &out}
-	require.NoError(t, c.Convert(src, "in.tf"))
-	got := out.String()
-	assert.Contains(t, got, `"aws:username" = ["alice", "bob", "carol"]`)
-	assert.Equal(t, 1, strings.Count(got, `"aws:username"`),
+
+resource "test" "x" {
+  v = data.aws_iam_policy_document.p.json
+}
+`,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, out, `"aws:username" = ["alice", "bob", "carol"]`)
+	assert.Equal(t, 1, strings.Count(out, `"aws:username"`),
 		"duplicate variable keys must be merged into one")
 }
 
 func TestConvert_ConditionMergeNonLiteralFails(t *testing.T) {
-	src := []byte(`
-data "aws_iam_policy_document" "p" {
+	_, _, err := run(t, map[string]string{
+		"main.tf": `data "aws_iam_policy_document" "p" {
   statement {
     actions   = ["s3:GetObject"]
     resources = ["*"]
@@ -416,17 +603,15 @@ data "aws_iam_policy_document" "p" {
     }
   }
 }
-`)
-	var out bytes.Buffer
-	c := &iampd2j.Converter{Out: &out}
-	err := c.Convert(src, "in.tf")
+`,
+	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "list literals")
 }
 
 func TestConvert_ConditionBlockMissingFields(t *testing.T) {
-	src := []byte(`
-data "aws_iam_policy_document" "p" {
+	_, _, err := run(t, map[string]string{
+		"main.tf": `data "aws_iam_policy_document" "p" {
   statement {
     actions   = ["s3:GetObject"]
     resources = ["*"]
@@ -435,35 +620,35 @@ data "aws_iam_policy_document" "p" {
     }
   }
 }
-`)
-	var out bytes.Buffer
-	c := &iampd2j.Converter{Out: &out}
-	err := c.Convert(src, "in.tf")
+`,
+	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "test, variable, and values")
 }
 
 func TestNewConverter_Defaults(t *testing.T) {
-	c := iampd2j.NewConverter()
+	c := iampd2j.NewConverter("/tmp")
 	require.NotNil(t, c)
 	assert.NotNil(t, c.Out)
 	assert.NotNil(t, c.Err)
+	assert.Equal(t, "/tmp", c.Dir)
 }
 
 func TestConvert_ZeroValueConverterDefaults(t *testing.T) {
-	// Feed an input that fails to parse, so the default writers are assigned
-	// but Convert exits before writing anything. This lets us observe the
-	// defaulting behavior without touching process-global os.Stdout / os.Stderr.
-	c := &iampd2j.Converter{}
-	err := c.Convert([]byte(`data "x" {`), "in.tf")
+	// Confirm that a zero-value Converter still works (initializes defaults).
+	dir := setupDir(t, map[string]string{
+		"main.tf": `data "aws_iam_policy_document" "p" {`, // parse error → exits before any writes
+	})
+	c := &iampd2j.Converter{Dir: dir}
+	err := c.Run(false)
 	require.Error(t, err)
 	assert.Same(t, os.Stdout, c.Out)
 	assert.Same(t, os.Stderr, c.Err)
 }
 
 func TestConvert_NonStatementBlockSkipped(t *testing.T) {
-	src := []byte(`
-data "aws_iam_policy_document" "p" {
+	dir := setupDir(t, map[string]string{
+		"main.tf": `data "aws_iam_policy_document" "p" {
   unknown_block {
     foo = "bar"
   }
@@ -472,18 +657,25 @@ data "aws_iam_policy_document" "p" {
     resources = ["*"]
   }
 }
-`)
-	var out bytes.Buffer
-	c := &iampd2j.Converter{Out: &out, Err: io.Discard}
-	require.NoError(t, c.Convert(src, "in.tf"))
-	got := out.String()
+
+resource "test" "x" {
+  v = data.aws_iam_policy_document.p.json
+}
+`,
+	})
+	var outBuf bytes.Buffer
+	c := iampd2j.NewConverter(dir)
+	c.Out = &outBuf
+	c.Err = io.Discard
+	require.NoError(t, c.Run(false))
+	got := outBuf.String()
 	assert.NotContains(t, got, "unknown_block")
 	assert.Regexp(t, `Action\s*=\s*\["s3:GetObject"\]`, got)
 }
 
 func TestConvert_NotPrincipalsMergeNonLiteralFails(t *testing.T) {
-	src := []byte(`
-data "aws_iam_policy_document" "p" {
+	_, _, err := run(t, map[string]string{
+		"main.tf": `data "aws_iam_policy_document" "p" {
   statement {
     effect  = "Deny"
     actions = ["s3:*"]
@@ -497,17 +689,15 @@ data "aws_iam_policy_document" "p" {
     }
   }
 }
-`)
-	var out bytes.Buffer
-	c := &iampd2j.Converter{Out: &out, Err: io.Discard}
-	err := c.Convert(src, "in.tf")
+`,
+	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not_principals.identifiers")
 }
 
 func TestConvert_EmptyStringKeyIsQuoted(t *testing.T) {
-	src := []byte(`
-data "aws_iam_policy_document" "p" {
+	out, _, err := run(t, map[string]string{
+		"main.tf": `data "aws_iam_policy_document" "p" {
   statement {
     actions = ["sts:AssumeRole"]
     principals {
@@ -516,16 +706,19 @@ data "aws_iam_policy_document" "p" {
     }
   }
 }
-`)
-	var out bytes.Buffer
-	c := &iampd2j.Converter{Out: &out, Err: io.Discard}
-	require.NoError(t, c.Convert(src, "in.tf"))
-	assert.Contains(t, out.String(), `"" = ["arn:aws:iam::111:role/a"]`)
+
+resource "test" "x" {
+  v = data.aws_iam_policy_document.p.json
+}
+`,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, out, `"" = ["arn:aws:iam::111:role/a"]`)
 }
 
 func TestConvert_NonIdentifierKeyIsQuoted(t *testing.T) {
-	src := []byte(`
-data "aws_iam_policy_document" "p" {
+	out, _, err := run(t, map[string]string{
+		"main.tf": `data "aws_iam_policy_document" "p" {
   statement {
     actions = ["sts:AssumeRole"]
     principals {
@@ -534,9 +727,110 @@ data "aws_iam_policy_document" "p" {
     }
   }
 }
-`)
-	var out bytes.Buffer
-	c := &iampd2j.Converter{Out: &out, Err: io.Discard}
-	require.NoError(t, c.Convert(src, "in.tf"))
-	assert.Contains(t, out.String(), `"1Custom" = ["arn:aws:iam::111:role/a"]`)
+
+resource "test" "x" {
+  v = data.aws_iam_policy_document.p.json
+}
+`,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, out, `"1Custom" = ["arn:aws:iam::111:role/a"]`)
+}
+
+func TestConvert_VerboseLogsTouchedFiles(t *testing.T) {
+	// Verbose=true exercises the log.Printf branches we otherwise skip; run
+	// it through and make sure nothing panics. We capture log output to keep
+	// the test output clean.
+	var logBuf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&logBuf)
+	t.Cleanup(func() { log.SetOutput(prev) })
+
+	dir := setupDir(t, map[string]string{
+		"main.tf": `data "aws_iam_policy_document" "p" {
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = ["*"]
+  }
+}
+
+resource "test" "x" {
+  v = data.aws_iam_policy_document.p.json
+}
+`,
+	})
+	c := iampd2j.NewConverter(dir)
+	c.Err = io.Discard
+	c.Verbose = true
+	require.NoError(t, c.Run(true))
+	logged := logBuf.String()
+	assert.Contains(t, logged, "inline data.aws_iam_policy_document.p.json")
+	assert.Contains(t, logged, "remove data.aws_iam_policy_document.p")
+	assert.Contains(t, logged, "rewrote")
+}
+
+type failWriter struct{}
+
+func (failWriter) Write([]byte) (int, error) { return 0, errors.New("boom") }
+
+func TestConvert_WriteErrorPropagates(t *testing.T) {
+	dir := setupDir(t, map[string]string{
+		"main.tf": `data "aws_iam_policy_document" "p" {
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = ["*"]
+  }
+}
+
+resource "test" "x" {
+  v = data.aws_iam_policy_document.p.json
+}
+`,
+	})
+	c := iampd2j.NewConverter(dir)
+	c.Out = failWriter{}
+	c.Err = io.Discard
+	err := c.Run(false)
+	require.Error(t, err)
+}
+
+func TestConvert_UnreadableFile(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can read 0o000 files")
+	}
+	dir := t.TempDir()
+	p := filepath.Join(dir, "main.tf")
+	require.NoError(t, os.WriteFile(p, []byte(`resource "x" "y" {}`), 0o644))
+	require.NoError(t, os.Chmod(p, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(p, 0o644) })
+
+	c := iampd2j.NewConverter(dir)
+	c.Out = io.Discard
+	c.Err = io.Discard
+	err := c.Run(false)
+	require.Error(t, err)
+}
+
+func TestConvert_InPlaceWritesFiles(t *testing.T) {
+	dir := setupDir(t, map[string]string{
+		"main.tf": `data "aws_iam_policy_document" "p" {
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = ["*"]
+  }
+}
+
+resource "test" "x" {
+  v = data.aws_iam_policy_document.p.json
+}
+`,
+	})
+	c := iampd2j.NewConverter(dir)
+	c.Err = io.Discard
+	require.NoError(t, c.Run(true))
+	body, err := os.ReadFile(filepath.Join(dir, "main.tf"))
+	require.NoError(t, err)
+	got := string(body)
+	assert.NotContains(t, got, `data "aws_iam_policy_document"`)
+	assert.Contains(t, got, "jsonencode({")
 }
