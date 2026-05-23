@@ -81,6 +81,9 @@ func NewConverter(dir string) *Converter {
 // rewritten on disk; otherwise the rewritten content for any changed file is
 // printed to c.Out preceded by a `### <path> ###` header.
 func (c *Converter) Run(inPlace bool) error {
+	if c.Dir == "" {
+		c.Dir = "."
+	}
 	if c.Out == nil {
 		c.Out = os.Stdout
 	}

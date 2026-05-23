@@ -1013,6 +1013,30 @@ resource "c" "x" { v = data.aws_iam_policy_document.p.override_json }
 	assert.Equal(t, 1, strings.Count(errBuf.String(), "is not supported"))
 }
 
+func TestConvert_EmptyDirDefaultsToCWD(t *testing.T) {
+	dir := setupDir(t, map[string]string{
+		"main.tf": `data "aws_iam_policy_document" "p" {
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = ["*"]
+  }
+}
+
+resource "test" "x" { v = data.aws_iam_policy_document.p.json }
+`,
+	})
+	t.Chdir(dir)
+
+	c := &iampd2j.Converter{} // zero-value, no Dir
+	c.Err = io.Discard
+	require.NoError(t, c.Run(true))
+	assert.Equal(t, ".", c.Dir)
+
+	body, err := os.ReadFile(filepath.Join(dir, "main.tf"))
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "jsonencode({")
+}
+
 func TestConvert_MissingDirReturnsError(t *testing.T) {
 	c := iampd2j.NewConverter(filepath.Join(t.TempDir(), "does-not-exist"))
 	c.Err = io.Discard
