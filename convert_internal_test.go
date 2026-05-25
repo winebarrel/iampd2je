@@ -244,6 +244,43 @@ func TestTrimLeadingBlankLines(t *testing.T) {
 	assert.Equal(t, []byte(""), trimLeadingBlankLines([]byte("")))
 }
 
+func TestUnwrapSingletonTuple_Singleton(t *testing.T) {
+	assert.Equal(t, `"x"`, unwrapSingletonTuple(`["x"]`))
+}
+
+func TestUnwrapSingletonTuple_MultipleElements(t *testing.T) {
+	// More than one element → input unchanged.
+	assert.Equal(t, `["a", "b"]`, unwrapSingletonTuple(`["a", "b"]`))
+}
+
+func TestUnwrapSingletonTuple_Empty(t *testing.T) {
+	// Zero elements → input unchanged (no element to promote).
+	assert.Equal(t, `[]`, unwrapSingletonTuple(`[]`))
+}
+
+func TestUnwrapSingletonTuple_NotATuple(t *testing.T) {
+	// Bare reference parses as ScopeTraversalExpr, not TupleConsExpr.
+	assert.Equal(t, "var.x", unwrapSingletonTuple("var.x"))
+}
+
+func TestUnwrapSingletonTuple_ForExpr(t *testing.T) {
+	// `[for ...]` is a ForExpr, not a TupleConsExpr — leave it alone even
+	// though it's bracketed.
+	in := "[for x in xs : x]"
+	assert.Equal(t, in, unwrapSingletonTuple(in))
+}
+
+func TestUnwrapSingletonTuple_ParseError(t *testing.T) {
+	// Malformed input is left as-is rather than panicking.
+	assert.Equal(t, "[unterminated", unwrapSingletonTuple("[unterminated"))
+}
+
+func TestUnwrapSingletonTuple_NestedElement(t *testing.T) {
+	// The unwrapped element keeps its full source text, including nested
+	// expressions and surrounding whitespace inside the brackets.
+	assert.Equal(t, "var.x", unwrapSingletonTuple("[ var.x ]"))
+}
+
 func TestTupleInner_ParseError(t *testing.T) {
 	_, ok := tupleInner("[unterminated")
 	assert.False(t, ok)

@@ -549,7 +549,7 @@ func convertStatement(body *hclwrite.Body) (string, error) {
 		{"not_resources", "NotResource"},
 	} {
 		if attr := body.GetAttribute(m.hcl); attr != nil {
-			fmt.Fprintf(&sb, "%s = %s\n", m.json, exprString(attr.Expr()))
+			fmt.Fprintf(&sb, "%s = %s\n", m.json, unwrapSingletonTuple(exprString(attr.Expr())))
 		}
 	}
 
@@ -622,7 +622,7 @@ func buildPrincipals(body *hclwrite.Body, blockType string) (string, error) {
 			}
 			val = merged
 		}
-		fmt.Fprintf(&sb, "%s = %s\n", emitKeys[k], val)
+		fmt.Fprintf(&sb, "%s = %s\n", emitKeys[k], unwrapSingletonTuple(val))
 	}
 	sb.WriteString("}")
 	return sb.String(), nil
@@ -656,6 +656,29 @@ func mergeTupleLiterals(exprs []string) (string, bool) {
 		}
 	}
 	return "[" + strings.Join(items, ", ") + "]", true
+}
+
+// unwrapSingletonTuple normalizes a single-element tuple literal to its sole
+// element. The aws_iam_policy_document data source renders single-element
+// lists as scalars in the resulting JSON (e.g. `["s3:GetObject"]` becomes
+// `"s3:GetObject"`), so we mirror that for the fields IAM treats as
+// scalar-or-list (Action/Resource, Principal identifiers, Condition values).
+//
+// Only static tuple literals are unwrapped — references, function calls, and
+// for-expressions can't be evaluated statically, so they're left untouched.
+// IAM accepts either form at runtime, so the difference is cosmetic.
+func unwrapSingletonTuple(s string) string {
+	src := strings.TrimSpace(s)
+	expr, diags := hclsyntax.ParseExpression([]byte(src), "", hcl.Pos{Line: 1, Column: 1})
+	if diags.HasErrors() {
+		return s
+	}
+	tup, ok := expr.(*hclsyntax.TupleConsExpr)
+	if !ok || len(tup.Exprs) != 1 {
+		return s
+	}
+	r := tup.Exprs[0].Range()
+	return strings.TrimSpace(src[r.Start.Byte:r.End.Byte])
 }
 
 // tupleInner returns the inner text of an HCL tuple constructor expression
@@ -742,7 +765,7 @@ func buildConditions(body *hclwrite.Body) (string, error) {
 				}
 				val = merged
 			}
-			fmt.Fprintf(&sb, "%s = %s\n", vg.emit[v], val)
+			fmt.Fprintf(&sb, "%s = %s\n", vg.emit[v], unwrapSingletonTuple(val))
 		}
 		sb.WriteString("}\n")
 	}
