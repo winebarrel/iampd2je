@@ -232,7 +232,7 @@ resource "test" "x" {
 `,
 	})
 	require.NoError(t, err)
-	assert.Contains(t, out, "(var.principal_type) = [")
+	assert.Contains(t, out, `(var.principal_type) = "arn:aws:iam::111:role/a"`)
 }
 
 func TestConvert_PrincipalTypeMixedLiteralAndDynamic(t *testing.T) {
@@ -263,7 +263,7 @@ resource "test" "x" {
 	require.NoError(t, err)
 	assert.Regexp(t,
 		`AWS\s*=\s*\["arn:aws:iam::111:role/a", "arn:aws:iam::222:role/b"\]`, out)
-	assert.Contains(t, out, "(var.extra_type)")
+	assert.Contains(t, out, `(var.extra_type) = "arn:aws:iam::333:role/c"`)
 }
 
 func TestConvert_ConditionTestAndVariableDynamicKey(t *testing.T) {
@@ -287,7 +287,7 @@ resource "test" "x" {
 	})
 	require.NoError(t, err)
 	assert.Contains(t, out, "(var.cond_test) = {")
-	assert.Contains(t, out, "(var.cond_var) = [")
+	assert.Contains(t, out, `(var.cond_var) = "x"`)
 }
 
 func TestConvert_EmptyStatementListEmitted(t *testing.T) {
@@ -725,7 +725,7 @@ resource "test" "x" {
 `,
 	})
 	require.NoError(t, err)
-	assert.Contains(t, out, `"aws:foo$bar" = ["x"]`)
+	assert.Contains(t, out, `"aws:foo$bar" = "x"`)
 }
 
 func TestConvert_PrincipalBlockMissingFields(t *testing.T) {
@@ -859,7 +859,7 @@ resource "test" "x" {
 	require.NoError(t, c.Run(false))
 	got := outBuf.String()
 	assert.NotContains(t, got, "unknown_block")
-	assert.Regexp(t, `Action\s*=\s*\["s3:GetObject"\]`, got)
+	assert.Regexp(t, `Action\s*=\s*"s3:GetObject"`, got)
 }
 
 func TestConvert_NotPrincipalsMergeNonLiteralFails(t *testing.T) {
@@ -902,7 +902,7 @@ resource "test" "x" {
 `,
 	})
 	require.NoError(t, err)
-	assert.Contains(t, out, `"" = ["arn:aws:iam::111:role/a"]`)
+	assert.Contains(t, out, `"" = "arn:aws:iam::111:role/a"`)
 }
 
 func TestConvert_NonIdentifierKeyIsQuoted(t *testing.T) {
@@ -923,7 +923,7 @@ resource "test" "x" {
 `,
 	})
 	require.NoError(t, err)
-	assert.Contains(t, out, `"1Custom" = ["arn:aws:iam::111:role/a"]`)
+	assert.Contains(t, out, `"1Custom" = "arn:aws:iam::111:role/a"`)
 }
 
 func TestConvert_VerboseLogsTouchedFiles(t *testing.T) {
@@ -1177,4 +1177,142 @@ resource "test" "x" {
 	got := string(body)
 	assert.NotContains(t, got, `data "aws_iam_policy_document"`)
 	assert.Contains(t, got, "jsonencode({")
+}
+
+func TestConvert_SingletonTupleUnwrappedAcrossFields(t *testing.T) {
+	// aws_iam_policy_document renders single-element lists as scalars in the
+	// resulting JSON. The conversion mirrors that for actions, resources,
+	// principal identifiers, and condition values when they're tuple literals.
+	out, _, err := run(t, map[string]string{
+		"main.tf": `data "aws_iam_policy_document" "p" {
+  statement {
+    actions       = ["s3:GetObject"]
+    not_actions   = ["s3:DeleteObject"]
+    resources     = ["arn:aws:s3:::b/*"]
+    not_resources = ["arn:aws:s3:::other/*"]
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::111:role/a"]
+    }
+    not_principals {
+      type        = "Service"
+      identifiers = ["s3.amazonaws.com"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:username"
+      values   = ["alice"]
+    }
+  }
+}
+
+resource "test" "x" {
+  v = data.aws_iam_policy_document.p.json
+}
+`,
+	})
+	require.NoError(t, err)
+	assert.Regexp(t, `Action\s*=\s*"s3:GetObject"`, out)
+	assert.Regexp(t, `NotAction\s*=\s*"s3:DeleteObject"`, out)
+	assert.Regexp(t, `Resource\s*=\s*"arn:aws:s3:::b/\*"`, out)
+	assert.Regexp(t, `NotResource\s*=\s*"arn:aws:s3:::other/\*"`, out)
+	assert.Regexp(t, `AWS\s*=\s*"arn:aws:iam::111:role/a"`, out)
+	assert.Regexp(t, `Service\s*=\s*"s3\.amazonaws\.com"`, out)
+	assert.Contains(t, out, `"aws:username" = "alice"`)
+}
+
+func TestConvert_MultiElementTupleNotUnwrapped(t *testing.T) {
+	// Two or more elements stay as a list — only single-element tuple
+	// literals are unwrapped.
+	out, _, err := run(t, map[string]string{
+		"main.tf": `data "aws_iam_policy_document" "p" {
+  statement {
+    actions   = ["s3:GetObject", "s3:ListBucket"]
+    resources = ["*"]
+  }
+}
+
+resource "test" "x" {
+  v = data.aws_iam_policy_document.p.json
+}
+`,
+	})
+	require.NoError(t, err)
+	assert.Regexp(t, `Action\s*=\s*\["s3:GetObject", "s3:ListBucket"\]`, out)
+	assert.Regexp(t, `Resource\s*=\s*"\*"`, out)
+}
+
+func TestConvert_NonLiteralExpressionsNotUnwrapped(t *testing.T) {
+	// References, function calls, and for-expressions can't be evaluated
+	// statically — we can't know their length, so leave them as written.
+	out, _, err := run(t, map[string]string{
+		"main.tf": `data "aws_iam_policy_document" "p" {
+  statement {
+    actions   = var.actions
+    resources = concat(["a"], var.extra)
+    condition {
+      test     = "StringEquals"
+      variable = "aws:username"
+      values   = [for u in var.users : u.name]
+    }
+  }
+}
+
+resource "test" "x" {
+  v = data.aws_iam_policy_document.p.json
+}
+`,
+	})
+	require.NoError(t, err)
+	assert.Regexp(t, `Action\s*=\s*var\.actions`, out)
+	assert.Regexp(t, `Resource\s*=\s*concat\(\["a"\], var\.extra\)`, out)
+	assert.Contains(t, out, `"aws:username" = [for u in var.users : u.name]`)
+}
+
+func TestConvert_EmptyTupleNotUnwrapped(t *testing.T) {
+	// An empty list isn't a single-element tuple, so it stays `[]`. (This is
+	// a weird input that real configs wouldn't write, but the unwrap rule
+	// should be conservative.)
+	out, _, err := run(t, map[string]string{
+		"main.tf": `data "aws_iam_policy_document" "p" {
+  statement {
+    actions   = []
+    resources = ["*"]
+  }
+}
+
+resource "test" "x" {
+  v = data.aws_iam_policy_document.p.json
+}
+`,
+	})
+	require.NoError(t, err)
+	assert.Regexp(t, `Action\s*=\s*\[\]`, out)
+}
+
+func TestConvert_MergedDownToOneElementIsUnwrapped(t *testing.T) {
+	// Multiple principals blocks of the same type get merged. If the merged
+	// result is exactly one identifier, unwrap it to a scalar.
+	out, _, err := run(t, map[string]string{
+		"main.tf": `data "aws_iam_policy_document" "p" {
+  statement {
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::111:role/a"]
+    }
+    principals {
+      type        = "AWS"
+      identifiers = []
+    }
+  }
+}
+
+resource "test" "x" {
+  v = data.aws_iam_policy_document.p.json
+}
+`,
+	})
+	require.NoError(t, err)
+	assert.Regexp(t, `AWS\s*=\s*"arn:aws:iam::111:role/a"`, out)
 }

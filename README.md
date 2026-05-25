@@ -84,11 +84,11 @@ resource "aws_iam_role_policy" "bucket_read" {
           "${aws_s3_bucket.example.arn}/*",
         ]
         Principal = {
-          AWS = ["arn:aws:iam::123456789012:role/example"]
+          AWS = "arn:aws:iam::123456789012:role/example"
         }
         Condition = {
           StringEquals = {
-            "aws:username" = ["alice"]
+            "aws:username" = "alice"
           }
         }
       }
@@ -100,6 +100,7 @@ resource "aws_iam_role_policy" "bucket_read" {
 Notes:
 
 - `version` defaults to `"2012-10-17"` and `effect` defaults to `"Allow"` when omitted in the data source, matching Terraform's defaults.
+- Single-element list literals on `actions` / `not_actions` / `resources` / `not_resources`, `principals.identifiers`, and `condition.values` are emitted as scalars, mirroring how `aws_iam_policy_document` renders these fields in JSON (e.g. `actions = ["s3:GetObject"]` → `Action = "s3:GetObject"`). Non-literal expressions (`var.x`, `concat(...)`, etc.) are left untouched — IAM accepts either form at runtime.
 - Multiple `principals` blocks with the same `type` are merged into a single flat list. The same merging applies to `condition` blocks that share `test` + `variable`. List-literal `identifiers` / `values` only — references (e.g. `var.x`) make merging fail with an error rather than emit a `concat()`.
 - Non-literal `principals.type`, `condition.test`, and `condition.variable` are spliced as HCL dynamic keys (`(var.x) = ...`), so configs that pass variables through these fields still convert cleanly.
 - Only `data.aws_iam_policy_document.<name>.json` references are rewritten. If a policy is also referenced via something else (`.minified_json`, `.override_json`, etc.), the `.json` sites are still inlined but the data block is kept so the other accessors keep resolving (a stderr warning calls this out).
